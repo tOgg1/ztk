@@ -44,7 +44,7 @@ pub fn handleCommand(allocator: std.mem.Allocator, args: []const [:0]const u8) !
             .init => cmdInit(allocator),
             .status => cmdStatus(allocator),
             .update => cmdUpdate(allocator),
-            .merge => cmdMerge(allocator),
+            .merge => cmdMerge(allocator, args),
             .help => printUsage(),
         }
     } else {
@@ -252,6 +252,19 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
             continue;
         };
 
+        if (gh_client.isPRMergedOrClosed(branch_name)) {
+            ui.print("  {s}{s}{s} {s}  {s}[already merged]{s}\n", .{
+                ui.Style.dim,
+                ui.Style.other,
+                ui.Style.reset,
+                commit.title,
+                ui.Style.dim,
+                ui.Style.reset,
+            });
+            skipped_count += 1;
+            continue;
+        }
+
         const base_ref = prev_branch orelse cfg.main_branch;
 
         ui.print("  {s}{s}{s} {s}\n", .{
@@ -362,7 +375,14 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
     ui.print("\n\n", .{});
 }
 
-fn cmdMerge(allocator: std.mem.Allocator) void {
+fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
+    var auto_rebase = false;
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "-ar") or std.mem.eql(u8, arg, "--auto-rebase")) {
+            auto_rebase = true;
+        }
+    }
+
     const cfg = config.load(allocator) catch |err| {
         switch (err) {
             config.ConfigError.ConfigNotFound => {
@@ -568,6 +588,24 @@ fn cmdMerge(allocator: std.mem.Allocator) void {
         ui.print(" {s}failed{s}\n", .{ ui.Style.yellow, ui.Style.reset });
     }
 
+    if (auto_rebase) {
+        var rebase_target_buf: [256]u8 = undefined;
+        const rebase_target = std.fmt.bufPrint(&rebase_target_buf, "{s}/{s}", .{ cfg.remote, cfg.main_branch }) catch {
+            ui.printError("Failed to format rebase target\n", .{});
+            return;
+        };
+
+        ui.print("  Rebasing onto {s}...", .{rebase_target});
+        const rebase_output = git.run(allocator, &.{ "rebase", rebase_target });
+        if (rebase_output) |output| {
+            allocator.free(output);
+            ui.print(" {s}done{s}\n", .{ ui.Style.green, ui.Style.reset });
+        } else |_| {
+            ui.print(" {s}failed{s}\n", .{ ui.Style.red, ui.Style.reset });
+            ui.printError("Rebase failed. Resolve conflicts and run 'git rebase --continue'\n", .{});
+        }
+    }
+
     ui.print("\n", .{});
 }
 
@@ -582,8 +620,11 @@ fn printUsage() void {
         \\    init              Initialize ztk in the current repository
         \\    status, s, st     Show status of the current stack
         \\    update, u, up     Create/update pull requests for commits in the stack
-        \\    merge, m          Merge all mergeable PRs bottom-up
+        \\    merge, m          Merge all mergeable PRs (top PR targets main, lower PRs closed)
         \\    help, --help, -h  Show this help message
+        \\
+        \\MERGE OPTIONS:
+        \\    -ar, --auto-rebase  Rebase current branch onto updated main after merge
         \\
         \\EXAMPLES:
         \\    ztk init          # Initialize ztk config

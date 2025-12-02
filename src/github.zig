@@ -112,12 +112,17 @@ pub const Client = struct {
     }
 
     pub fn findPR(self: *Client, head_branch: []const u8) GitHubError!?PullRequest {
+        return self.findPRWithState(head_branch, "open");
+    }
+
+    pub fn findPRWithState(self: *Client, head_branch: []const u8, state: []const u8) GitHubError!?PullRequest {
         var url_buf: [512]u8 = undefined;
-        const url = std.fmt.bufPrint(&url_buf, "https://api.github.com/repos/{s}/{s}/pulls?head={s}:{s}&state=open", .{
+        const url = std.fmt.bufPrint(&url_buf, "https://api.github.com/repos/{s}/{s}/pulls?head={s}:{s}&state={s}", .{
             self.owner,
             self.repo,
             self.owner,
             head_branch,
+            state,
         }) catch return GitHubError.OutOfMemory;
 
         const response = self.curlRequest("GET", url, null) catch return GitHubError.RequestFailed;
@@ -136,6 +141,16 @@ pub const Client = struct {
         const pr = array.items[0].object;
         const parsed_pr = self.parsePR(pr) catch |err| return err;
         return parsed_pr;
+    }
+
+    pub fn isPRMergedOrClosed(self: *Client, head_branch: []const u8) bool {
+        const pr = self.findPRWithState(head_branch, "closed") catch return false;
+        if (pr) |found_pr| {
+            var mutable_pr = found_pr;
+            mutable_pr.deinit(self.allocator);
+            return true;
+        }
+        return false;
     }
 
     pub fn createPR(self: *Client, head: []const u8, base: []const u8, title: []const u8, body: []const u8) GitHubError!PullRequest {
