@@ -366,3 +366,19 @@ pub fn deleteRemoteBranch(allocator: std.mem.Allocator, remote: []const u8, bran
     const output = run(allocator, &.{ "push", remote, ref });
     if (output) |o| allocator.free(o) else |_| return GitError.CommandFailed;
 }
+
+pub fn commitFixup(allocator: std.mem.Allocator, target_sha: []const u8) GitError!void {
+    const output = run(allocator, &.{ "commit", "--fixup", target_sha });
+    if (output) |o| allocator.free(o) else |_| return GitError.CommandFailed;
+}
+
+pub fn rebaseInteractiveAutosquash(allocator: std.mem.Allocator, base: []const u8) GitError!void {
+    const output = run(allocator, &.{ "-c", "sequence.editor=true", "rebase", "-i", "--autosquash", "--autostash", base });
+    if (output) |o| allocator.free(o) else |_| return GitError.CommandFailed;
+}
+
+pub fn hasStagedChanges(allocator: std.mem.Allocator) bool {
+    const output = run(allocator, &.{ "diff", "--cached", "--quiet" }) catch return true;
+    allocator.free(output);
+    return false;
+}

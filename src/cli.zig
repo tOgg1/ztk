@@ -10,6 +10,7 @@ pub const Command = enum {
     status,
     update,
     sync,
+    modify,
     help,
 
     pub fn fromString(str: []const u8) ?Command {
@@ -22,6 +23,8 @@ pub const Command = enum {
             .{ "u", .update },
             .{ "up", .update },
             .{ "sync", .sync },
+            .{ "modify", .modify },
+            .{ "m", .modify },
             .{ "help", .help },
             .{ "--help", .help },
             .{ "-h", .help },
@@ -44,6 +47,7 @@ pub fn handleCommand(allocator: std.mem.Allocator, args: []const [:0]const u8) !
             .status => cmdStatus(allocator),
             .update => cmdUpdate(allocator),
             .sync => cmdSync(allocator),
+            .modify => cmdModify(allocator),
             .help => printUsage(),
         }
     } else {
@@ -691,6 +695,147 @@ fn cmdSync(allocator: std.mem.Allocator) void {
     ui.print("\n\n", .{});
 }
 
+fn cmdModify(allocator: std.mem.Allocator) void {
+    const cfg = config.load(allocator) catch |err| {
+        switch (err) {
+            config.ConfigError.ConfigNotFound => {
+                ui.printError("Not initialized. Run 'ztk init' first.\n", .{});
+            },
+            config.ConfigError.NotInGitRepo => {
+                ui.printError("Not in a git repository.\n", .{});
+            },
+            else => {
+                ui.printError("Failed to load config: {any}\n", .{err});
+            },
+        }
+        return;
+    };
+    defer {
+        var c = cfg;
+        c.deinit(allocator);
+    }
+
+    const stk = stack.readStack(allocator, cfg) catch |err| {
+        ui.printError("Failed to read stack: {any}\n", .{err});
+        return;
+    };
+    defer {
+        var s = stk;
+        s.deinit(allocator);
+    }
+
+    if (stk.commits.len == 0) {
+        ui.printError("No commits to modify\n", .{});
+        return;
+    }
+
+    if (!git.hasStagedChanges(allocator)) {
+        ui.printError("No staged changes. Stage your changes first with 'git add'.\n", .{});
+        return;
+    }
+
+    ui.print("\n  Select a commit to modify:\n\n", .{});
+
+    var i: usize = stk.commits.len;
+    while (i > 0) {
+        i -= 1;
+        const commit = stk.commits[i];
+        const num = stk.commits.len - i;
+        const is_current = i == stk.commits.len - 1;
+
+        if (is_current) {
+            ui.print("    {s}[{d}]{s} {s}{s}{s} {s}{s}{s}\n", .{
+                ui.Style.bold,
+                num,
+                ui.Style.reset,
+                ui.Style.green,
+                ui.Style.current,
+                ui.Style.reset,
+                ui.Style.bold,
+                commit.title,
+                ui.Style.reset,
+            });
+        } else {
+            ui.print("    {s}[{d}]{s} {s}{s}{s} {s}\n", .{
+                ui.Style.dim,
+                num,
+                ui.Style.reset,
+                ui.Style.blue,
+                ui.Style.other,
+                ui.Style.reset,
+                commit.title,
+            });
+        }
+    }
+
+    ui.print("\n", .{});
+
+    if (stk.commits.len == 1) {
+        ui.print("  Commit to modify (1): ", .{});
+    } else {
+        ui.print("  Commit to modify (1-{d}): ", .{stk.commits.len});
+    }
+
+    var input_buf: [32]u8 = undefined;
+    var input_len: usize = 0;
+    const stdin_fd = std.posix.STDIN_FILENO;
+    while (input_len < input_buf.len) {
+        const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
+            ui.printError("Failed to read input\n", .{});
+            return;
+        };
+        if (bytes_read == 0) break;
+        input_len += bytes_read;
+        if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
+    }
+    const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
+
+    if (input == null) {
+        ui.print("\n  Cancelled.\n\n", .{});
+        return;
+    }
+
+    const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
+    if (trimmed.len == 0) {
+        ui.print("  Cancelled.\n\n", .{});
+        return;
+    }
+
+    const commit_num = std.fmt.parseInt(usize, trimmed, 10) catch {
+        ui.printError("Invalid input. Enter a number.\n", .{});
+        return;
+    };
+
+    if (commit_num < 1 or commit_num > stk.commits.len) {
+        ui.printError("Invalid commit number: {d}. Must be between 1 and {d}.\n", .{ commit_num, stk.commits.len });
+        return;
+    }
+
+    const commit_idx = stk.commits.len - commit_num;
+    const target_commit = stk.commits[commit_idx];
+
+    ui.print("\n  Modifying: {s}{s}{s}\n", .{ ui.Style.bold, target_commit.title, ui.Style.reset });
+
+    git.commitFixup(allocator, target_commit.sha) catch {
+        ui.printError("Failed to create fixup commit\n", .{});
+        return;
+    };
+
+    var base_buf: [256]u8 = undefined;
+    const rebase_base = std.fmt.bufPrint(&base_buf, "{s}/{s}", .{ cfg.remote, cfg.main_branch }) catch {
+        ui.printError("Buffer overflow\n", .{});
+        return;
+    };
+
+    git.rebaseInteractiveAutosquash(allocator, rebase_base) catch {
+        ui.printError("Rebase failed. Resolve conflicts, then run 'git rebase --continue'.\n", .{});
+        return;
+    };
+
+    ui.print("  {s}{s}{s} Commit modified and stack rebased\n\n", .{ ui.Style.green, ui.Style.check, ui.Style.reset });
+    ui.print("  Run {s}ztk update{s} to sync changes to GitHub.\n\n", .{ ui.Style.bold, ui.Style.reset });
+}
+
 fn printUsage() void {
     const usage =
         \\ztk - Stacked Pull Requests on GitHub
@@ -703,6 +848,7 @@ fn printUsage() void {
         \\    status, s, st     Show status of the current stack
         \\    update, u, up     Create/update pull requests for commits in the stack
         \\    sync              Fetch, rebase on main, and clean merged branches
+        \\    modify, m         Amend a commit in the middle of the stack
         \\    help, --help, -h  Show this help message
         \\
         \\EXAMPLES:
@@ -710,6 +856,7 @@ fn printUsage() void {
         \\    ztk status        # Show stack status
         \\    ztk update        # Sync stack to GitHub
         \\    ztk sync          # Rebase on main and clean up
+        \\    ztk modify        # Amend a commit in the stack
         \\
     ;
     ui.print("{s}", .{usage});
