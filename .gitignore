@@ -8,3 +8,5 @@ zig-out/
 *.exe
 *.bin
 
+
+START.md
