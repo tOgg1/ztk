@@ -382,3 +382,174 @@ pub fn hasStagedChanges(allocator: std.mem.Allocator) bool {
     allocator.free(output);
     return false;
 }
+
+pub fn getStagedDiff(allocator: std.mem.Allocator) GitError![]u8 {
+    return run(allocator, &.{ "diff", "--cached", "-U0" });
+}
+
+pub const Hunk = struct {
+    file_path: []const u8,
+    old_start: u32,
+    old_count: u32,
+    new_start: u32,
+    new_count: u32,
+    content: []const u8,
+
+    pub fn deinit(self: *Hunk, allocator: std.mem.Allocator) void {
+        allocator.free(self.file_path);
+        allocator.free(self.content);
+    }
+};
+
+pub fn parseDiffHunks(allocator: std.mem.Allocator, diff_output: []const u8) GitError![]Hunk {
+    var hunks = std.ArrayListUnmanaged(Hunk){};
+    errdefer {
+        for (hunks.items) |*h| h.deinit(allocator);
+        hunks.deinit(allocator);
+    }
+
+    var current_file: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, diff_output, '\n');
+
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "diff --git ")) {
+            if (current_file) |f| allocator.free(f);
+            const a_start = std.mem.indexOf(u8, line, " a/") orelse continue;
+            const b_start = std.mem.indexOf(u8, line, " b/") orelse continue;
+            const path = line[a_start + 3 .. b_start];
+            current_file = allocator.dupe(u8, path) catch return GitError.OutOfMemory;
+        } else if (std.mem.startsWith(u8, line, "@@")) {
+            const file_path = current_file orelse continue;
+
+            const hunk_info = parseHunkHeader(line) orelse continue;
+
+            var content_list = std.ArrayListUnmanaged(u8){};
+            defer content_list.deinit(allocator);
+
+            while (lines.next()) |content_line| {
+                if (std.mem.startsWith(u8, content_line, "@@") or
+                    std.mem.startsWith(u8, content_line, "diff --git "))
+                {
+                    lines.index = lines.index.? - content_line.len - 1;
+                    break;
+                }
+                if (std.mem.startsWith(u8, content_line, "-") or
+                    std.mem.startsWith(u8, content_line, "+"))
+                {
+                    content_list.appendSlice(allocator, content_line) catch return GitError.OutOfMemory;
+                    content_list.append(allocator, '\n') catch return GitError.OutOfMemory;
+                }
+            }
+
+            const file_copy = allocator.dupe(u8, file_path) catch return GitError.OutOfMemory;
+            errdefer allocator.free(file_copy);
+            const content_copy = content_list.toOwnedSlice(allocator) catch return GitError.OutOfMemory;
+
+            hunks.append(allocator, .{
+                .file_path = file_copy,
+                .old_start = hunk_info.old_start,
+                .old_count = hunk_info.old_count,
+                .new_start = hunk_info.new_start,
+                .new_count = hunk_info.new_count,
+                .content = content_copy,
+            }) catch return GitError.OutOfMemory;
+        }
+    }
+
+    if (current_file) |f| allocator.free(f);
+    return hunks.toOwnedSlice(allocator) catch return GitError.OutOfMemory;
+}
+
+const HunkHeader = struct {
+    old_start: u32,
+    old_count: u32,
+    new_start: u32,
+    new_count: u32,
+};
+
+fn parseHunkHeader(line: []const u8) ?HunkHeader {
+    if (!std.mem.startsWith(u8, line, "@@ -")) return null;
+
+    const range_end = std.mem.indexOf(u8, line[4..], " @@") orelse return null;
+    const range_str = line[4 .. 4 + range_end];
+
+    const plus_idx = std.mem.indexOf(u8, range_str, " +") orelse return null;
+    const old_range = range_str[0..plus_idx];
+    const new_range = range_str[plus_idx + 2 ..];
+
+    const old_start, const old_count = parseRange(old_range);
+    const new_start, const new_count = parseRange(new_range);
+
+    return .{
+        .old_start = old_start,
+        .old_count = old_count,
+        .new_start = new_start,
+        .new_count = new_count,
+    };
+}
+
+fn parseRange(range: []const u8) struct { u32, u32 } {
+    if (std.mem.indexOf(u8, range, ",")) |comma_idx| {
+        const start = std.fmt.parseInt(u32, range[0..comma_idx], 10) catch return .{ 0, 0 };
+        const count = std.fmt.parseInt(u32, range[comma_idx + 1 ..], 10) catch return .{ 0, 0 };
+        return .{ start, count };
+    } else {
+        const start = std.fmt.parseInt(u32, range, 10) catch return .{ 0, 0 };
+        return .{ start, 1 };
+    }
+}
+
+pub const BlameResult = struct {
+    sha: []const u8,
+    line: u32,
+
+    pub fn deinit(self: *BlameResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.sha);
+    }
+};
+
+pub fn blameLines(allocator: std.mem.Allocator, file_path: []const u8, start_line: u32, count: u32) GitError![]BlameResult {
+    if (count == 0) return allocator.alloc(BlameResult, 0) catch return GitError.OutOfMemory;
+
+    var range_buf: [64]u8 = undefined;
+    const range = std.fmt.bufPrint(&range_buf, "-L{d},{d}", .{ start_line, start_line + count - 1 }) catch return GitError.OutOfMemory;
+
+    const output = run(allocator, &.{ "blame", "--porcelain", range, "--", file_path }) catch |err| {
+        return err;
+    };
+    defer allocator.free(output);
+
+    var results = std.ArrayListUnmanaged(BlameResult){};
+    errdefer {
+        for (results.items) |*r| r.deinit(allocator);
+        results.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    var current_line: u32 = start_line;
+
+    while (lines.next()) |line| {
+        if (line.len >= 40 and isHexString(line[0..40])) {
+            const sha_copy = allocator.dupe(u8, line[0..40]) catch return GitError.OutOfMemory;
+            results.append(allocator, .{
+                .sha = sha_copy,
+                .line = current_line,
+            }) catch {
+                allocator.free(sha_copy);
+                return GitError.OutOfMemory;
+            };
+            current_line += 1;
+        }
+    }
+
+    return results.toOwnedSlice(allocator) catch return GitError.OutOfMemory;
+}
+
+fn isHexString(s: []const u8) bool {
+    for (s) |c| {
+        if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F'))) {
+            return false;
+        }
+    }
+    return true;
+}

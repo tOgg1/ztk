@@ -11,6 +11,7 @@ pub const Command = enum {
     update,
     sync,
     modify,
+    absorb,
     help,
 
     pub fn fromString(str: []const u8) ?Command {
@@ -25,6 +26,9 @@ pub const Command = enum {
             .{ "sync", .sync },
             .{ "modify", .modify },
             .{ "m", .modify },
+            .{ "absorb", .absorb },
+            .{ "a", .absorb },
+            .{ "ab", .absorb },
             .{ "help", .help },
             .{ "--help", .help },
             .{ "-h", .help },
@@ -48,6 +52,7 @@ pub fn handleCommand(allocator: std.mem.Allocator, args: []const [:0]const u8) !
             .update => cmdUpdate(allocator),
             .sync => cmdSync(allocator),
             .modify => cmdModify(allocator),
+            .absorb => cmdAbsorb(allocator),
             .help => printUsage(),
         }
     } else {
@@ -836,6 +841,341 @@ fn cmdModify(allocator: std.mem.Allocator) void {
     ui.print("  Run {s}ztk update{s} to sync changes to GitHub.\n\n", .{ ui.Style.bold, ui.Style.reset });
 }
 
+const AbsorbTarget = struct {
+    commit_sha: []const u8,
+    commit_title: []const u8,
+    hunk_count: usize,
+    files: std.ArrayListUnmanaged([]const u8),
+
+    fn deinit(self: *AbsorbTarget, allocator: std.mem.Allocator) void {
+        for (self.files.items) |f| allocator.free(f);
+        self.files.deinit(allocator);
+    }
+};
+
+fn cmdAbsorb(allocator: std.mem.Allocator) void {
+    const cfg = config.load(allocator) catch |err| {
+        switch (err) {
+            config.ConfigError.ConfigNotFound => {
+                ui.printError("Not initialized. Run 'ztk init' first.\n", .{});
+            },
+            config.ConfigError.NotInGitRepo => {
+                ui.printError("Not in a git repository.\n", .{});
+            },
+            else => {
+                ui.printError("Failed to load config: {any}\n", .{err});
+            },
+        }
+        return;
+    };
+    defer {
+        var c = cfg;
+        c.deinit(allocator);
+    }
+
+    const stk = stack.readStack(allocator, cfg) catch |err| {
+        ui.printError("Failed to read stack: {any}\n", .{err});
+        return;
+    };
+    defer {
+        var s = stk;
+        s.deinit(allocator);
+    }
+
+    if (stk.commits.len == 0) {
+        ui.printError("No commits in stack to absorb into\n", .{});
+        return;
+    }
+
+    if (!git.hasStagedChanges(allocator)) {
+        ui.printError("No staged changes. Stage your changes first with 'git add'.\n", .{});
+        return;
+    }
+
+    const diff_output = git.getStagedDiff(allocator) catch {
+        ui.printError("Failed to get staged diff\n", .{});
+        return;
+    };
+    defer allocator.free(diff_output);
+
+    if (diff_output.len == 0) {
+        ui.printError("No staged changes found\n", .{});
+        return;
+    }
+
+    const hunks = git.parseDiffHunks(allocator, diff_output) catch {
+        ui.printError("Failed to parse diff hunks\n", .{});
+        return;
+    };
+    defer {
+        for (hunks) |*h| {
+            var hunk = h.*;
+            hunk.deinit(allocator);
+        }
+        allocator.free(hunks);
+    }
+
+    if (hunks.len == 0) {
+        ui.printError("No hunks found in staged changes\n", .{});
+        return;
+    }
+
+    var commit_sha_set = std.StringHashMap(void).init(allocator);
+    defer commit_sha_set.deinit();
+    for (stk.commits) |commit| {
+        commit_sha_set.put(commit.sha, {}) catch {};
+    }
+
+    var absorb_map = std.StringHashMap(AbsorbTarget).init(allocator);
+    defer {
+        var iter = absorb_map.iterator();
+        while (iter.next()) |entry| {
+            var target = entry.value_ptr;
+            target.deinit(allocator);
+        }
+        absorb_map.deinit();
+    }
+
+    var unabsorbable_count: usize = 0;
+
+    for (hunks) |hunk| {
+        if (hunk.old_count == 0) {
+            unabsorbable_count += 1;
+            continue;
+        }
+
+        const blame_results = git.blameLines(allocator, hunk.file_path, hunk.old_start, hunk.old_count) catch {
+            unabsorbable_count += 1;
+            continue;
+        };
+        defer {
+            for (blame_results) |*r| {
+                var result = r.*;
+                result.deinit(allocator);
+            }
+            allocator.free(blame_results);
+        }
+
+        if (blame_results.len == 0) {
+            unabsorbable_count += 1;
+            continue;
+        }
+
+        var target_sha: ?[]const u8 = null;
+        var all_same = true;
+
+        for (blame_results) |result| {
+            if (!commit_sha_set.contains(result.sha)) {
+                all_same = false;
+                break;
+            }
+            if (target_sha == null) {
+                target_sha = result.sha;
+            } else if (!std.mem.eql(u8, target_sha.?, result.sha)) {
+                all_same = false;
+                break;
+            }
+        }
+
+        if (!all_same or target_sha == null) {
+            unabsorbable_count += 1;
+            continue;
+        }
+
+        const sha = target_sha.?;
+
+        if (absorb_map.getPtr(sha)) |target| {
+            target.hunk_count += 1;
+            var found = false;
+            for (target.files.items) |f| {
+                if (std.mem.eql(u8, f, hunk.file_path)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                const file_copy = allocator.dupe(u8, hunk.file_path) catch continue;
+                target.files.append(allocator, file_copy) catch {
+                    allocator.free(file_copy);
+                    continue;
+                };
+            }
+        } else {
+            var commit_title: []const u8 = "unknown";
+            for (stk.commits) |commit| {
+                if (std.mem.eql(u8, commit.sha, sha)) {
+                    commit_title = commit.title;
+                    break;
+                }
+            }
+
+            var files = std.ArrayListUnmanaged([]const u8){};
+            const file_copy = allocator.dupe(u8, hunk.file_path) catch continue;
+            files.append(allocator, file_copy) catch {
+                allocator.free(file_copy);
+                continue;
+            };
+
+            absorb_map.put(sha, .{
+                .commit_sha = sha,
+                .commit_title = commit_title,
+                .hunk_count = 1,
+                .files = files,
+            }) catch continue;
+        }
+    }
+
+    if (absorb_map.count() == 0) {
+        ui.print("\n  {s}No hunks can be absorbed deterministically.{s}\n", .{ ui.Style.yellow, ui.Style.reset });
+        ui.print("  Use {s}ztk modify{s} to manually select a commit.\n\n", .{ ui.Style.bold, ui.Style.reset });
+        return;
+    }
+
+    ui.print("\n  {s}Absorb plan:{s}\n\n", .{ ui.Style.bold, ui.Style.reset });
+
+    var absorb_iter = absorb_map.iterator();
+    var total_hunks: usize = 0;
+    while (absorb_iter.next()) |entry| {
+        const target = entry.value_ptr;
+        total_hunks += target.hunk_count;
+
+        ui.print("  {s}{s}{s} {s}\n", .{
+            ui.Style.blue,
+            ui.Style.other,
+            ui.Style.reset,
+            target.commit_title,
+        });
+        ui.print("  {s}{s}{s}  {d} hunk{s} from: ", .{
+            ui.Style.dim,
+            ui.Style.pipe,
+            ui.Style.reset,
+            target.hunk_count,
+            if (target.hunk_count == 1) "" else "s",
+        });
+        for (target.files.items, 0..) |file, i| {
+            if (i > 0) ui.print(", ", .{});
+            ui.print("{s}{s}{s}", .{ ui.Style.dim, file, ui.Style.reset });
+        }
+        ui.print("\n\n", .{});
+    }
+
+    if (unabsorbable_count > 0) {
+        ui.print("  {s}{s} {d} hunk{s} cannot be absorbed (new lines or mixed origins){s}\n\n", .{
+            ui.Style.yellow,
+            ui.Style.warning,
+            unabsorbable_count,
+            if (unabsorbable_count == 1) "" else "s",
+            ui.Style.reset,
+        });
+    }
+
+    ui.print("  Absorb {d} hunk{s} into {d} commit{s}? [y/N]: ", .{
+        total_hunks,
+        if (total_hunks == 1) "" else "s",
+        absorb_map.count(),
+        if (absorb_map.count() == 1) "" else "s",
+    });
+
+    var input_buf: [32]u8 = undefined;
+    var input_len: usize = 0;
+    const stdin_fd = std.posix.STDIN_FILENO;
+    while (input_len < input_buf.len) {
+        const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
+            ui.printError("Failed to read input\n", .{});
+            return;
+        };
+        if (bytes_read == 0) break;
+        input_len += bytes_read;
+        if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
+    }
+    const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
+
+    if (input == null) {
+        ui.print("\n  Cancelled.\n\n", .{});
+        return;
+    }
+
+    const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
+    if (trimmed.len == 0 or (trimmed[0] != 'y' and trimmed[0] != 'Y')) {
+        ui.print("  Cancelled.\n\n", .{});
+        return;
+    }
+
+    ui.print("\n", .{});
+
+    var commits_to_fixup = std.ArrayListUnmanaged([]const u8){};
+    defer commits_to_fixup.deinit(allocator);
+
+    for (stk.commits) |commit| {
+        if (absorb_map.contains(commit.sha)) {
+            commits_to_fixup.append(allocator, commit.sha) catch continue;
+        }
+    }
+
+    if (git.run(allocator, &.{"stash"})) |o| {
+        allocator.free(o);
+    } else |_| {}
+
+    const stash_output = git.run(allocator, &.{ "stash", "list" }) catch null;
+    const had_stash = if (stash_output) |o| blk: {
+        defer allocator.free(o);
+        break :blk o.len > 0;
+    } else false;
+
+    for (commits_to_fixup.items) |sha| {
+        const target = absorb_map.get(sha) orelse continue;
+
+        if (git.run(allocator, &.{ "stash", "pop" })) |o| allocator.free(o) else |_| {}
+
+        for (target.files.items) |file| {
+            if (git.run(allocator, &.{ "add", file })) |o| allocator.free(o) else |_| {}
+        }
+
+        git.commitFixup(allocator, sha) catch {
+            ui.printError("Failed to create fixup commit for {s}\n", .{target.commit_title});
+            continue;
+        };
+
+        ui.print("  {s}{s}{s} Created fixup for: {s}\n", .{
+            ui.Style.green,
+            ui.Style.check,
+            ui.Style.reset,
+            target.commit_title,
+        });
+
+        if (git.run(allocator, &.{"stash"})) |o| allocator.free(o) else |_| {}
+    }
+
+    if (had_stash) {
+        if (git.run(allocator, &.{ "stash", "pop" })) |o| allocator.free(o) else |_| {}
+    }
+
+    var base_buf: [256]u8 = undefined;
+    const rebase_base = std.fmt.bufPrint(&base_buf, "{s}/{s}", .{ cfg.remote, cfg.main_branch }) catch {
+        ui.printError("Buffer overflow\n", .{});
+        return;
+    };
+
+    ui.print("\n  {s}Rebasing to squash fixups...{s}", .{ ui.Style.dim, ui.Style.reset });
+    git.rebaseInteractiveAutosquash(allocator, rebase_base) catch {
+        ui.print(" {s}failed{s}\n", .{ ui.Style.red, ui.Style.reset });
+        ui.printError("Rebase failed. Resolve conflicts, then run 'git rebase --continue'.\n", .{});
+        return;
+    };
+    ui.print(" {s}done{s}\n", .{ ui.Style.green, ui.Style.reset });
+
+    ui.print("\n  {s}{s}{s} Absorbed {d} hunk{s} into {d} commit{s}\n\n", .{
+        ui.Style.green,
+        ui.Style.check,
+        ui.Style.reset,
+        total_hunks,
+        if (total_hunks == 1) "" else "s",
+        absorb_map.count(),
+        if (absorb_map.count() == 1) "" else "s",
+    });
+    ui.print("  Run {s}ztk update{s} to sync changes to GitHub.\n\n", .{ ui.Style.bold, ui.Style.reset });
+}
+
 fn printUsage() void {
     const usage =
         \\ztk - Stacked Pull Requests on GitHub
@@ -849,6 +1189,7 @@ fn printUsage() void {
         \\    update, u, up     Create/update pull requests for commits in the stack
         \\    sync              Fetch, rebase on main, and clean merged branches
         \\    modify, m         Amend a commit in the middle of the stack
+        \\    absorb, a, ab     Auto-amend staged changes into relevant commits
         \\    help, --help, -h  Show this help message
         \\
         \\EXAMPLES:
@@ -857,6 +1198,7 @@ fn printUsage() void {
         \\    ztk update        # Sync stack to GitHub
         \\    ztk sync          # Rebase on main and clean up
         \\    ztk modify        # Amend a commit in the stack
+        \\    ztk absorb        # Auto-absorb staged changes
         \\
     ;
     ui.print("{s}", .{usage});
