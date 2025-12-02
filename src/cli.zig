@@ -3,6 +3,7 @@ const ui = @import("ui.zig");
 const config = @import("config.zig");
 const git = @import("git.zig");
 const stack = @import("stack.zig");
+const github = @import("github.zig");
 
 pub const Command = enum {
     init,
@@ -168,8 +169,193 @@ fn cmdStatus(allocator: std.mem.Allocator) void {
 }
 
 fn cmdUpdate(allocator: std.mem.Allocator) void {
-    _ = allocator;
-    ui.print("ztk update: not implemented\n", .{});
+    const cfg = config.load(allocator) catch |err| {
+        switch (err) {
+            config.ConfigError.ConfigNotFound => {
+                ui.printError("Not initialized. Run 'ztk init' first.\n", .{});
+            },
+            config.ConfigError.NotInGitRepo => {
+                ui.printError("Not in a git repository.\n", .{});
+            },
+            else => {
+                ui.printError("Failed to load config: {any}\n", .{err});
+            },
+        }
+        return;
+    };
+    defer {
+        var c = cfg;
+        c.deinit(allocator);
+    }
+
+    const stk = stack.readStack(allocator, cfg) catch |err| {
+        ui.printError("Failed to read stack: {any}\n", .{err});
+        return;
+    };
+    defer {
+        var s = stk;
+        s.deinit(allocator);
+    }
+
+    if (stk.commits.len == 0) {
+        ui.print("No commits to sync.\n", .{});
+        return;
+    }
+
+    var gh_client = github.Client.init(allocator, cfg) catch |err| {
+        switch (err) {
+            github.GitHubError.NoToken => {
+                ui.printError("GitHub authentication failed.\n", .{});
+                ui.print("  Run 'gh auth login' or set GITHUB_TOKEN.\n", .{});
+            },
+            else => {
+                ui.printError("Failed to initialize GitHub client: {any}\n", .{err});
+            },
+        }
+        return;
+    };
+    defer gh_client.deinit();
+
+    ui.print("\n", .{});
+    ui.print("  {s}Syncing stack to GitHub...{s}\n", .{ ui.Style.bold, ui.Style.reset });
+    ui.print("\n", .{});
+
+    var created_count: usize = 0;
+    var updated_count: usize = 0;
+    var skipped_count: usize = 0;
+    var prev_branch: ?[]const u8 = null;
+
+    for (stk.commits) |commit| {
+        if (commit.is_wip) {
+            ui.print("  {s}{s}{s} {s}  {s}[WIP skipped]{s}\n", .{
+                ui.Style.yellow,
+                ui.Style.other,
+                ui.Style.reset,
+                commit.title,
+                ui.Style.dim,
+                ui.Style.reset,
+            });
+            skipped_count += 1;
+            continue;
+        }
+
+        var branch_buf: [256]u8 = undefined;
+        const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
+            stk.head_branch,
+            commit.short_sha,
+        }) catch {
+            ui.printError("Branch name too long\n", .{});
+            continue;
+        };
+
+        const base_ref = prev_branch orelse cfg.main_branch;
+
+        ui.print("  {s}{s}{s} {s}\n", .{
+            ui.Style.blue,
+            ui.Style.other,
+            ui.Style.reset,
+            commit.title,
+        });
+
+        ui.print("  {s}{s}{s}   {s}Branch: {s}{s}\n", .{
+            ui.Style.dim,
+            ui.Style.pipe,
+            ui.Style.reset,
+            ui.Style.dim,
+            branch_name,
+            ui.Style.reset,
+        });
+
+        git.ensureBranchAt(allocator, branch_name, commit.sha) catch {
+            ui.printError("    Failed to create branch\n", .{});
+            continue;
+        };
+
+        ui.print("  {s}{s}{s}   {s}Pushing...{s}", .{
+            ui.Style.dim,
+            ui.Style.pipe,
+            ui.Style.reset,
+            ui.Style.dim,
+            ui.Style.reset,
+        });
+
+        git.push(allocator, cfg.remote, branch_name, true) catch {
+            ui.print(" {s}failed{s}\n", .{ ui.Style.red, ui.Style.reset });
+            continue;
+        };
+        ui.print(" {s}done{s}\n", .{ ui.Style.green, ui.Style.reset });
+
+        const existing_pr = gh_client.findPR(branch_name) catch null;
+
+        if (existing_pr) |pr| {
+            ui.print("  {s}{s}{s}   {s}PR #{d} updated{s}\n", .{
+                ui.Style.dim,
+                ui.Style.pipe,
+                ui.Style.reset,
+                ui.Style.dim,
+                pr.number,
+                ui.Style.reset,
+            });
+            gh_client.updatePR(pr.number, commit.title, commit.body, base_ref) catch {
+                ui.printError("    Failed to update PR\n", .{});
+            };
+            updated_count += 1;
+            var mutable_pr = pr;
+            mutable_pr.deinit(allocator);
+        } else {
+            ui.print("  {s}{s}{s}   {s}Creating PR...{s}", .{
+                ui.Style.dim,
+                ui.Style.pipe,
+                ui.Style.reset,
+                ui.Style.dim,
+                ui.Style.reset,
+            });
+
+            const new_pr = gh_client.createPR(branch_name, base_ref, commit.title, commit.body) catch {
+                ui.print(" {s}failed{s}\n", .{ ui.Style.red, ui.Style.reset });
+                continue;
+            };
+            ui.print(" {s}done{s} {s}→ #{d}{s}\n", .{
+                ui.Style.green,
+                ui.Style.reset,
+                ui.Style.blue,
+                new_pr.number,
+                ui.Style.reset,
+            });
+            created_count += 1;
+            var mutable_pr = new_pr;
+            mutable_pr.deinit(allocator);
+        }
+
+        ui.print("  {s}{s}{s}\n", .{ ui.Style.dim, ui.Style.pipe, ui.Style.reset });
+
+        if (prev_branch) |pb| allocator.free(pb);
+        prev_branch = allocator.dupe(u8, branch_name) catch null;
+    }
+
+    if (prev_branch) |pb| allocator.free(pb);
+
+    ui.print("\n", .{});
+    ui.print("  {s}{s} Stack synced:{s} ", .{ ui.Style.green, ui.Style.check, ui.Style.reset });
+
+    const total = created_count + updated_count;
+    ui.print("{d} PR{s}", .{ total, if (total == 1) "" else "s" });
+
+    if (created_count > 0) {
+        ui.print(" ({s}{d} created{s}", .{ ui.Style.green, created_count, ui.Style.reset });
+        if (updated_count > 0) {
+            ui.print(", {d} updated", .{updated_count});
+        }
+        ui.print(")", .{});
+    } else if (updated_count > 0) {
+        ui.print(" ({d} updated)", .{updated_count});
+    }
+
+    if (skipped_count > 0) {
+        ui.print(", {s}{d} WIP skipped{s}", .{ ui.Style.yellow, skipped_count, ui.Style.reset });
+    }
+
+    ui.print("\n\n", .{});
 }
 
 fn printUsage() void {
