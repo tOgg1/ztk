@@ -1,0 +1,10 @@
+.reference
+
+# Zig build artifacts
+.zig-cache/
+zig-out/
+*.o
+*.obj
+*.exe
+*.bin
+
