@@ -22,6 +22,7 @@ pub const PRSpec = struct {
     title: []const u8,
     body: []const u8,
     is_wip: bool,
+    ztk_id: ?[]const u8,
 };
 
 pub fn readStack(allocator: std.mem.Allocator, config: cfg.Config) !Stack {
@@ -63,10 +64,15 @@ pub fn derivePRSpecs(allocator: std.mem.Allocator, stk: Stack, config: cfg.Confi
     var prev_branch: ?[]const u8 = null;
 
     for (stk.commits) |commit| {
+        const id_suffix = if (commit.ztk_id) |id|
+            id[0..@min(8, id.len)]
+        else
+            commit.short_sha;
+
         var branch_buf: [256]u8 = undefined;
         const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
             stk.head_branch,
-            commit.short_sha,
+            id_suffix,
         }) catch return error.OutOfMemory;
 
         const branch_copy = try allocator.dupe(u8, branch_name);
@@ -85,6 +91,7 @@ pub fn derivePRSpecs(allocator: std.mem.Allocator, stk: Stack, config: cfg.Confi
             .title = commit.title,
             .body = commit.body,
             .is_wip = commit.is_wip,
+            .ztk_id = commit.ztk_id,
         });
 
         if (prev_branch) |pb| allocator.free(pb);

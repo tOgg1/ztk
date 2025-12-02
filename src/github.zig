@@ -434,6 +434,32 @@ pub const Client = struct {
         };
     }
 
+    pub fn isPRMerged(self: *Client, head_branch: []const u8) bool {
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/repos/{s}/{s}/pulls?head={s}:{s}&state=all", .{
+            self.owner,
+            self.repo,
+            self.owner,
+            head_branch,
+        }) catch return false;
+
+        const response = self.request("GET", path, null) catch return false;
+        defer self.allocator.free(response);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, response, .{}) catch {
+            return false;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value != .array) return false;
+        const array = parsed.value.array;
+        if (array.items.len == 0) return false;
+
+        const pr = array.items[0].object;
+        const merged_at = pr.get("merged_at") orelse return false;
+        return merged_at != .null;
+    }
+
     fn parsePR(self: *Client, obj: std.json.ObjectMap) GitHubError!PullRequest {
         const number = @as(u32, @intCast(obj.get("number").?.integer));
 
