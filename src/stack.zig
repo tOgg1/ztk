@@ -56,16 +56,16 @@ pub fn readStack(allocator: std.mem.Allocator, config: cfg.Config) !Stack {
     };
 }
 
-pub fn derivePRSpecs(allocator: std.mem.Allocator, stack: Stack, config: cfg.Config) ![]PRSpec {
-    var specs = std.ArrayList(PRSpec).init(allocator);
-    errdefer specs.deinit();
+pub fn derivePRSpecs(allocator: std.mem.Allocator, stk: Stack, config: cfg.Config) ![]PRSpec {
+    var specs = std.ArrayListUnmanaged(PRSpec){};
+    errdefer specs.deinit(allocator);
 
     var prev_branch: ?[]const u8 = null;
 
-    for (stack.commits) |commit| {
+    for (stk.commits) |commit| {
         var branch_buf: [256]u8 = undefined;
         const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
-            stack.head_branch,
+            stk.head_branch,
             commit.short_sha,
         }) catch return error.OutOfMemory;
 
@@ -78,7 +78,7 @@ pub fn derivePRSpecs(allocator: std.mem.Allocator, stack: Stack, config: cfg.Con
             try allocator.dupe(u8, config.main_branch);
         errdefer allocator.free(base_ref);
 
-        try specs.append(.{
+        try specs.append(allocator, .{
             .sha = commit.sha,
             .branch_name = branch_copy,
             .base_ref = base_ref,
@@ -93,5 +93,5 @@ pub fn derivePRSpecs(allocator: std.mem.Allocator, stack: Stack, config: cfg.Con
 
     if (prev_branch) |pb| allocator.free(pb);
 
-    return specs.toOwnedSlice();
+    return specs.toOwnedSlice(allocator);
 }
