@@ -115,16 +115,24 @@ fn cmdStatus(allocator: std.mem.Allocator) void {
         return;
     }
 
+    var gh_client: ?github.Client = github.Client.init(allocator, cfg) catch null;
+    defer if (gh_client) |*client| client.deinit();
+
     ui.print("\n", .{});
-    ui.print("  {s}Stack:{s} {s}  ({d} commit{s} ahead of {s})\n", .{
+    ui.print("  {s}Stack:{s} {s}{s}{s}  ({d} commit{s} ahead of {s})\n", .{
         ui.Style.bold,
         ui.Style.reset,
+        ui.Style.blue,
         stk.head_branch,
+        ui.Style.reset,
         stk.commits.len,
         if (stk.commits.len == 1) "" else "s",
         stk.base_branch,
     });
     ui.print("\n", .{});
+
+    var wip_count: usize = 0;
+    var merged_count: usize = 0;
 
     var i: usize = stk.commits.len;
     while (i > 0) {
@@ -134,7 +142,25 @@ fn cmdStatus(allocator: std.mem.Allocator) void {
         const icon = if (is_current) ui.Style.current else ui.Style.other;
         const marker = if (is_current) ui.Style.dim ++ " " ++ ui.Style.arrow ++ " you are here" ++ ui.Style.reset else "";
 
-        if (commit.is_wip) {
+        var branch_buf: [256]u8 = undefined;
+        const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
+            stk.head_branch,
+            commit.short_sha,
+        }) catch "";
+
+        const is_merged = if (gh_client) |*client| client.isPRMergedOrClosed(branch_name) else false;
+
+        if (is_merged) {
+            merged_count += 1;
+            ui.print("  {s}{s} {s}  [merged]{s}{s}\n", .{
+                ui.Style.dim,
+                icon,
+                commit.title,
+                ui.Style.reset,
+                marker,
+            });
+        } else if (commit.is_wip) {
+            wip_count += 1;
             ui.print("  {s}{s}{s} {s}  {s}[WIP]{s}{s}\n", .{
                 ui.Style.yellow,
                 icon,
@@ -153,19 +179,17 @@ fn cmdStatus(allocator: std.mem.Allocator) void {
                 marker,
             });
         }
-        ui.print("  {s}   {s}{s}\n", .{ ui.Style.pipe, ui.Style.dim, commit.short_sha });
-        ui.print("  {s}{s}\n", .{ ui.Style.pipe, ui.Style.reset });
+        ui.print("  {s}   {s}{s}{s}\n", .{ ui.Style.pipe, ui.Style.dim, commit.short_sha, ui.Style.reset });
+        ui.print("  {s}\n", .{ui.Style.pipe});
     }
 
-    ui.print("  {s}{s}{s} {s}\n", .{ ui.Style.dim, ui.Style.other, ui.Style.reset, stk.base_branch });
+    ui.print("  {s}{s}{s} {s}{s}{s}\n", .{ ui.Style.dim, ui.Style.other, ui.Style.reset, ui.Style.green, stk.base_branch, ui.Style.reset });
     ui.print("\n", .{});
 
-    var wip_count: usize = 0;
-    for (stk.commits) |c| {
-        if (c.is_wip) wip_count += 1;
-    }
-
     ui.print("  Summary: {d} commit{s}", .{ stk.commits.len, if (stk.commits.len == 1) "" else "s" });
+    if (merged_count > 0) {
+        ui.print(", {s}{d} merged{s}", .{ ui.Style.dim, merged_count, ui.Style.reset });
+    }
     if (wip_count > 0) {
         ui.print(", {s}{d} WIP{s}", .{ ui.Style.yellow, wip_count, ui.Style.reset });
     }
@@ -226,12 +250,13 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
 
     var created_count: usize = 0;
     var updated_count: usize = 0;
-    var skipped_count: usize = 0;
+    var wip_count: usize = 0;
+    var merged_count: usize = 0;
     var prev_branch: ?[]const u8 = null;
 
     for (stk.commits) |commit| {
         if (commit.is_wip) {
-            ui.print("  {s}{s}{s} {s}  {s}[WIP skipped]{s}\n", .{
+            ui.print("  {s}{s}{s} {s}  {s}[WIP]{s}\n", .{
                 ui.Style.yellow,
                 ui.Style.other,
                 ui.Style.reset,
@@ -239,7 +264,7 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
                 ui.Style.dim,
                 ui.Style.reset,
             });
-            skipped_count += 1;
+            wip_count += 1;
             continue;
         }
 
@@ -253,7 +278,7 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
         };
 
         if (gh_client.isPRMergedOrClosed(branch_name)) {
-            ui.print("  {s}{s}{s} {s}  {s}[already merged]{s}\n", .{
+            ui.print("  {s}{s}{s} {s}  {s}[merged]{s}\n", .{
                 ui.Style.dim,
                 ui.Style.other,
                 ui.Style.reset,
@@ -261,7 +286,7 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
                 ui.Style.dim,
                 ui.Style.reset,
             });
-            skipped_count += 1;
+            merged_count += 1;
             continue;
         }
 
@@ -368,8 +393,11 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
         ui.print(" ({d} updated)", .{updated_count});
     }
 
-    if (skipped_count > 0) {
-        ui.print(", {s}{d} WIP skipped{s}", .{ ui.Style.yellow, skipped_count, ui.Style.reset });
+    if (merged_count > 0) {
+        ui.print(", {s}{d} already merged{s}", .{ ui.Style.dim, merged_count, ui.Style.reset });
+    }
+    if (wip_count > 0) {
+        ui.print(", {s}{d} WIP{s}", .{ ui.Style.yellow, wip_count, ui.Style.reset });
     }
 
     ui.print("\n\n", .{});
