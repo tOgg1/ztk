@@ -119,15 +119,17 @@ fn cmdStatus(allocator: std.mem.Allocator) void {
     defer if (gh_client) |*client| client.deinit();
 
     ui.print("\n", .{});
-    ui.print("  {s}Stack:{s} {s}{s}{s}  ({d} commit{s} ahead of {s})\n", .{
+    ui.print("  {s}Stack:{s} {s}{s}{s}  {s}({d} commit{s} ahead of {s}){s}\n", .{
         ui.Style.bold,
         ui.Style.reset,
         ui.Style.blue,
         stk.head_branch,
         ui.Style.reset,
+        ui.Style.dim,
         stk.commits.len,
         if (stk.commits.len == 1) "" else "s",
         stk.base_branch,
+        ui.Style.reset,
     });
     ui.print("\n", .{});
 
@@ -139,7 +141,6 @@ fn cmdStatus(allocator: std.mem.Allocator) void {
         i -= 1;
         const commit = stk.commits[i];
         const is_current = i == stk.commits.len - 1;
-        const icon = if (is_current) ui.Style.current else ui.Style.other;
         const marker = if (is_current) ui.Style.dim ++ " " ++ ui.Style.arrow ++ " you are here" ++ ui.Style.reset else "";
 
         var branch_buf: [256]u8 = undefined;
@@ -154,7 +155,7 @@ fn cmdStatus(allocator: std.mem.Allocator) void {
             merged_count += 1;
             ui.print("  {s}{s} {s}  [merged]{s}{s}\n", .{
                 ui.Style.dim,
-                icon,
+                ui.Style.other,
                 commit.title,
                 ui.Style.reset,
                 marker,
@@ -163,27 +164,36 @@ fn cmdStatus(allocator: std.mem.Allocator) void {
             wip_count += 1;
             ui.print("  {s}{s}{s} {s}  {s}[WIP]{s}{s}\n", .{
                 ui.Style.yellow,
-                icon,
+                ui.Style.current,
                 ui.Style.reset,
                 commit.title,
                 ui.Style.yellow,
                 ui.Style.reset,
                 marker,
             });
-        } else {
-            ui.print("  {s}{s}{s} {s}{s}\n", .{
-                if (is_current) ui.Style.bold else "",
-                icon,
+        } else if (is_current) {
+            ui.print("  {s}{s}{s} {s}{s}{s}{s}\n", .{
+                ui.Style.green,
+                ui.Style.current,
                 ui.Style.reset,
+                ui.Style.bold,
                 commit.title,
+                ui.Style.reset,
                 marker,
             });
+        } else {
+            ui.print("  {s}{s}{s} {s}\n", .{
+                ui.Style.blue,
+                ui.Style.other,
+                ui.Style.reset,
+                commit.title,
+            });
         }
-        ui.print("  {s}   {s}{s}{s}\n", .{ ui.Style.pipe, ui.Style.dim, commit.short_sha, ui.Style.reset });
-        ui.print("  {s}\n", .{ui.Style.pipe});
+        ui.print("  {s}{s}{s}   {s}{s}\n", .{ ui.Style.dim, ui.Style.pipe, ui.Style.reset, ui.Style.dim, commit.short_sha });
+        ui.print("  {s}{s}{s}\n", .{ ui.Style.dim, ui.Style.pipe, ui.Style.reset });
     }
 
-    ui.print("  {s}{s}{s} {s}{s}{s}\n", .{ ui.Style.dim, ui.Style.other, ui.Style.reset, ui.Style.green, stk.base_branch, ui.Style.reset });
+    ui.print("  {s}{s}{s} {s}{s}{s}\n", .{ ui.Style.dim, ui.Style.other, ui.Style.reset, ui.Style.dim, stk.base_branch, ui.Style.reset });
     ui.print("\n", .{});
 
     ui.print("  Summary: {d} commit{s}", .{ stk.commits.len, if (stk.commits.len == 1) "" else "s" });
