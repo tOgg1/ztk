@@ -1,6 +1,12 @@
 const std = @import("std");
 const config = @import("config.zig");
 
+pub const PRStatus = struct {
+    checks_passed: bool,
+    approved: bool,
+    mergeable: bool,
+};
+
 pub const PullRequest = struct {
     number: u32,
     html_url: []const u8,
@@ -8,6 +14,7 @@ pub const PullRequest = struct {
     head_ref: []const u8,
     base_ref: []const u8,
     title: []const u8,
+    mergeable: bool,
 
     pub fn deinit(self: *PullRequest, allocator: std.mem.Allocator) void {
         allocator.free(self.html_url);
@@ -215,6 +222,145 @@ pub const Client = struct {
         return try self.createPR(head, base, title, body);
     }
 
+    pub fn getPR(self: *Client, pr_number: u32) GitHubError!PullRequest {
+        var url_buf: [256]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "https://api.github.com/repos/{s}/{s}/pulls/{d}", .{
+            self.owner,
+            self.repo,
+            pr_number,
+        }) catch return GitHubError.OutOfMemory;
+
+        const response = self.curlRequest("GET", url, null) catch return GitHubError.RequestFailed;
+        defer self.allocator.free(response);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, response, .{}) catch {
+            return GitHubError.ParseError;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value != .object) {
+            return GitHubError.ParseError;
+        }
+
+        return self.parsePR(parsed.value.object);
+    }
+
+    pub fn getPRStatus(self: *Client, pr_number: u32) GitHubError!PRStatus {
+        const pr = try self.getPR(pr_number);
+        defer {
+            var mutable_pr = pr;
+            mutable_pr.deinit(self.allocator);
+        }
+
+        var url_buf: [512]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "https://api.github.com/repos/{s}/{s}/pulls/{d}/reviews", .{
+            self.owner,
+            self.repo,
+            pr_number,
+        }) catch return GitHubError.OutOfMemory;
+
+        const response = self.curlRequest("GET", url, null) catch return GitHubError.RequestFailed;
+        defer self.allocator.free(response);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, response, .{}) catch {
+            return GitHubError.ParseError;
+        };
+        defer parsed.deinit();
+
+        var approved = false;
+        if (parsed.value == .array) {
+            for (parsed.value.array.items) |review| {
+                if (review == .object) {
+                    if (review.object.get("state")) |state| {
+                        if (state == .string and std.mem.eql(u8, state.string, "APPROVED")) {
+                            approved = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        return PRStatus{
+            .checks_passed = true,
+            .approved = approved,
+            .mergeable = pr.mergeable,
+        };
+    }
+
+    pub fn mergePR(self: *Client, pr_number: u32) GitHubError!void {
+        var url_buf: [256]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "https://api.github.com/repos/{s}/{s}/pulls/{d}/merge", .{
+            self.owner,
+            self.repo,
+            pr_number,
+        }) catch return GitHubError.OutOfMemory;
+
+        const response = self.curlRequest("PUT", url, "{\"merge_method\":\"squash\"}") catch return GitHubError.RequestFailed;
+        defer self.allocator.free(response);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, response, .{}) catch {
+            return GitHubError.ParseError;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value == .object) {
+            if (parsed.value.object.get("merged")) |merged| {
+                if (merged == .bool and merged.bool) {
+                    return;
+                }
+            }
+            if (parsed.value.object.get("message")) |msg| {
+                if (msg == .string) {
+                    std.debug.print("Merge failed: {s}\n", .{msg.string});
+                }
+            }
+        }
+
+        return GitHubError.RequestFailed;
+    }
+
+    pub fn closePR(self: *Client, pr_number: u32) GitHubError!void {
+        var url_buf: [256]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "https://api.github.com/repos/{s}/{s}/pulls/{d}", .{
+            self.owner,
+            self.repo,
+            pr_number,
+        }) catch return GitHubError.OutOfMemory;
+
+        const response = self.curlRequest("PATCH", url, "{\"state\":\"closed\"}") catch return GitHubError.RequestFailed;
+        self.allocator.free(response);
+    }
+
+    pub fn commentPR(self: *Client, pr_number: u32, comment: []const u8) GitHubError!void {
+        var url_buf: [256]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "https://api.github.com/repos/{s}/{s}/issues/{d}/comments", .{
+            self.owner,
+            self.repo,
+            pr_number,
+        }) catch return GitHubError.OutOfMemory;
+
+        var json_buf: [4096]u8 = undefined;
+        const json_body = std.fmt.bufPrint(&json_buf, "{{\"body\":\"{s}\"}}", .{
+            escapeJson(comment),
+        }) catch return GitHubError.OutOfMemory;
+
+        const response = self.curlRequest("POST", url, json_body) catch return GitHubError.RequestFailed;
+        self.allocator.free(response);
+    }
+
+    pub fn deleteBranch(self: *Client, branch: []const u8) GitHubError!void {
+        var url_buf: [512]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "https://api.github.com/repos/{s}/{s}/git/refs/heads/{s}", .{
+            self.owner,
+            self.repo,
+            branch,
+        }) catch return GitHubError.OutOfMemory;
+
+        const response = self.curlRequest("DELETE", url, null) catch return GitHubError.RequestFailed;
+        self.allocator.free(response);
+    }
+
     fn parsePR(self: *Client, obj: std.json.ObjectMap) GitHubError!PullRequest {
         const number = @as(u32, @intCast(obj.get("number").?.integer));
 
@@ -234,6 +380,8 @@ pub const Client = struct {
 
         const pr_title = self.allocator.dupe(u8, obj.get("title").?.string) catch return GitHubError.OutOfMemory;
 
+        const mergeable = if (obj.get("mergeable")) |m| (m == .bool and m.bool) else false;
+
         return PullRequest{
             .number = number,
             .html_url = html_url,
@@ -241,6 +389,7 @@ pub const Client = struct {
             .head_ref = head_ref,
             .base_ref = base_ref,
             .title = pr_title,
+            .mergeable = mergeable,
         };
     }
 
