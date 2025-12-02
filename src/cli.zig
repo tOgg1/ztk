@@ -347,13 +347,17 @@ fn injectZtkIdsRebase(allocator: std.mem.Allocator, merge_base: []const u8, stk:
             return false;
         };
 
-        _ = git.run(allocator, &.{ "checkout", commit.sha }) catch {
+        if (git.run(allocator, &.{ "checkout", commit.sha })) |out| {
+            allocator.free(out);
+        } else |_| {
             ui.printError("Failed to checkout {s}\n", .{commit.short_sha});
             restoreAfterRebase(allocator, stk.head_branch, did_stash);
             return false;
-        };
+        }
 
-        _ = git.run(allocator, &.{ "rebase", "--onto", current_base, parent_ref, commit.sha }) catch {};
+        if (git.run(allocator, &.{ "rebase", "--onto", current_base, parent_ref, commit.sha })) |out| {
+            allocator.free(out);
+        } else |_| {}
 
         if (commit.ztk_id == null) {
             const msg = git.getCommitMessage(allocator, "HEAD") catch {
@@ -399,15 +403,19 @@ fn injectZtkIdsRebase(allocator: std.mem.Allocator, merge_base: []const u8, stk:
         allocator.free(new_sha);
     }
 
-    _ = git.run(allocator, &.{ "checkout", stk.head_branch }) catch {
+    if (git.run(allocator, &.{ "checkout", stk.head_branch })) |out| {
+        allocator.free(out);
+    } else |_| {
         ui.printError("Failed to return to branch\n", .{});
         return false;
-    };
+    }
 
-    _ = git.run(allocator, &.{ "reset", "--hard", current_base }) catch {
+    if (git.run(allocator, &.{ "reset", "--hard", current_base })) |out| {
+        allocator.free(out);
+    } else |_| {
         ui.printError("Failed to update branch\n", .{});
         return false;
-    };
+    }
 
     if (did_stash) {
         git.stashPop(allocator) catch {};
