@@ -558,6 +558,16 @@ fn cmdMerge(allocator: std.mem.Allocator) void {
         top_pr.number,
         ui.Style.reset,
     });
+
+    ui.print("  Fetching {s}...", .{cfg.remote});
+    const fetch_output = git.run(allocator, &.{ "fetch", cfg.remote });
+    if (fetch_output) |output| {
+        allocator.free(output);
+        ui.print(" {s}done{s}\n", .{ ui.Style.green, ui.Style.reset });
+    } else |_| {
+        ui.print(" {s}failed{s}\n", .{ ui.Style.yellow, ui.Style.reset });
+    }
+
     ui.print("\n", .{});
 }
 
