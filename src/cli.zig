@@ -18,6 +18,7 @@ pub const Command = enum {
     absorb,
     merge,
     review_cmd,
+    open,
     help,
 
     pub fn fromString(str: []const u8) ?Command {
@@ -40,6 +41,8 @@ pub const Command = enum {
             .{ "r", .review_cmd },
             .{ "rv", .review_cmd },
             .{ "feedback", .review_cmd },
+            .{ "open", .open },
+            .{ "o", .open },
             .{ "help", .help },
             .{ "--help", .help },
             .{ "-h", .help },
@@ -66,6 +69,7 @@ pub fn handleCommand(allocator: std.mem.Allocator, args: []const [:0]const u8) !
             .absorb => cmdAbsorb(allocator, args),
             .merge => cmdMerge(allocator, args),
             .review_cmd => cmdReview(allocator, args),
+            .open => cmdOpen(allocator),
             .help => printUsage(),
         }
     } else {
@@ -1793,6 +1797,191 @@ fn runReviewTUI(allocator: std.mem.Allocator, summary: *review.PRReviewSummary) 
     }
 }
 
+fn cmdOpen(allocator: std.mem.Allocator) void {
+    const cfg = config.load(allocator) catch |err| {
+        switch (err) {
+            config.ConfigError.ConfigNotFound => {
+                ui.printError("Not initialized. Run 'ztk init' first.\n", .{});
+            },
+            config.ConfigError.NotInGitRepo => {
+                ui.printError("Not in a git repository.\n", .{});
+            },
+            else => {
+                ui.printError("Failed to load config: {any}\n", .{err});
+            },
+        }
+        return;
+    };
+    defer {
+        var c = cfg;
+        c.deinit(allocator);
+    }
+
+    const stk = stack.readStack(allocator, cfg) catch |err| {
+        ui.printError("Failed to read stack: {any}\n", .{err});
+        return;
+    };
+    defer {
+        var s = stk;
+        s.deinit(allocator);
+    }
+
+    if (stk.commits.len == 0) {
+        ui.print("No commits in stack.\n", .{});
+        return;
+    }
+
+    var gh_client = github.Client.init(allocator, cfg) catch |err| {
+        if (err == github.GitHubError.NoToken) {
+            ui.printError("No GitHub token. Set GITHUB_TOKEN or install gh CLI.\n", .{});
+        } else {
+            ui.printError("Failed to init GitHub client: {any}\n", .{err});
+        }
+        return;
+    };
+    defer gh_client.deinit();
+
+    const specs = stack.derivePRSpecs(allocator, stk, cfg) catch {
+        ui.printError("Failed to derive PR specs\n", .{});
+        return;
+    };
+    defer {
+        for (specs) |spec| {
+            allocator.free(spec.branch_name);
+            allocator.free(spec.base_ref);
+        }
+        allocator.free(specs);
+    }
+
+    const OpenablePR = struct {
+        number: u32,
+        title: []const u8,
+        url: []const u8,
+    };
+
+    var prs = std.ArrayListUnmanaged(OpenablePR){};
+    defer {
+        for (prs.items) |pr| {
+            allocator.free(pr.url);
+        }
+        prs.deinit(allocator);
+    }
+
+    for (specs, 0..) |spec, idx| {
+        if (spec.is_wip) continue;
+
+        if (gh_client.findPR(spec.branch_name) catch null) |pr| {
+            var mutable_pr = pr;
+            defer mutable_pr.deinit(allocator);
+
+            if (std.mem.eql(u8, pr.state, "closed")) continue;
+
+            const url_copy = allocator.dupe(u8, pr.html_url) catch continue;
+            prs.append(allocator, .{
+                .number = pr.number,
+                .title = stk.commits[idx].title,
+                .url = url_copy,
+            }) catch {
+                allocator.free(url_copy);
+                continue;
+            };
+        }
+    }
+
+    if (prs.items.len == 0) {
+        ui.print("No PRs found. Run 'ztk update' first.\n", .{});
+        return;
+    }
+
+    if (prs.items.len == 1) {
+        const pr = prs.items[0];
+        ui.print("\n  Opening PR #{d}: {s}\n\n", .{ pr.number, pr.title });
+        openUrl(allocator, pr.url);
+        return;
+    }
+
+    // Multiple PRs - show selector
+    ui.print("\n  Select a PR to open:\n\n", .{});
+
+    for (prs.items, 0..) |pr, idx| {
+        const num = idx + 1;
+        ui.print("    {s}[{d}]{s} {s}#{d}{s} {s}\n", .{
+            ui.Style.dim,
+            num,
+            ui.Style.reset,
+            ui.Style.blue,
+            pr.number,
+            ui.Style.reset,
+            pr.title,
+        });
+    }
+
+    ui.print("\n", .{});
+    ui.print("  PR to open (1-{d}): ", .{prs.items.len});
+
+    var input_buf: [32]u8 = undefined;
+    var input_len: usize = 0;
+    const stdin_fd = std.posix.STDIN_FILENO;
+    while (input_len < input_buf.len) {
+        const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
+            ui.printError("Failed to read input\n", .{});
+            return;
+        };
+        if (bytes_read == 0) break;
+        input_len += bytes_read;
+        if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
+    }
+    const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
+
+    if (input == null) {
+        ui.print("\n  Cancelled.\n\n", .{});
+        return;
+    }
+
+    const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
+    if (trimmed.len == 0) {
+        ui.print("  Cancelled.\n\n", .{});
+        return;
+    }
+
+    const pr_num = std.fmt.parseInt(usize, trimmed, 10) catch {
+        ui.printError("Invalid input. Enter a number.\n", .{});
+        return;
+    };
+
+    if (pr_num < 1 or pr_num > prs.items.len) {
+        ui.printError("Invalid PR number: {d}. Must be between 1 and {d}.\n", .{ pr_num, prs.items.len });
+        return;
+    }
+
+    const selected_pr = prs.items[pr_num - 1];
+    ui.print("\n  Opening PR #{d}: {s}\n\n", .{ selected_pr.number, selected_pr.title });
+    openUrl(allocator, selected_pr.url);
+}
+
+fn openUrl(allocator: std.mem.Allocator, url: []const u8) void {
+    // Try platform-specific commands: macOS (open), Linux (xdg-open), WSL/fallback (wslview)
+    const commands = [_][]const u8{ "open", "xdg-open", "wslview" };
+
+    for (commands) |cmd| {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ cmd, url },
+        });
+        if (result) |r| {
+            allocator.free(r.stdout);
+            allocator.free(r.stderr);
+            if (r.term.Exited == 0) return; // Success
+        } else |_| {
+            continue; // Command not found, try next
+        }
+    }
+
+    // All commands failed - print URL for manual copy
+    ui.printError("Could not open browser automatically.\n", .{});
+    ui.print("  {s}\n", .{url});
+}
+
 fn printUsage() void {
     const usage =
         \\ztk - Stacked Pull Requests on GitHub
@@ -1809,6 +1998,7 @@ fn printUsage() void {
         \\    absorb, a, ab     Auto-amend staged changes into relevant commits
         \\    merge, m          Merge all mergeable PRs (top PR targets main, lower PRs closed)
         \\    review, r, rv     View and copy PR review feedback (interactive TUI)
+        \\    open, o           Open a PR in the browser
         \\    help, --help, -h  Show this help message
         \\
         \\MODIFY/ABSORB OPTIONS:
@@ -1836,6 +2026,7 @@ fn printUsage() void {
         \\    ztk merge -r      # Merge and rebase local branch
         \\    ztk review        # Interactive review feedback TUI
         \\    ztk review --list # Print feedback as list
+        \\    ztk open          # Open a PR in the browser
         \\
     ;
     ui.print("{s}", .{usage});
