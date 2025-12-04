@@ -189,11 +189,20 @@ pub const Terminal = struct {
     }
 };
 
+pub const ItemType = enum {
+    review_approved,
+    review_changes_requested,
+    review_commented,
+    review_pending,
+    comment,
+};
+
 pub const ListItem = struct {
     primary: []const u8, // main text
     secondary: ?[]const u8, // subtitle/metadata
     detail: ?[]const u8, // expandable content
     context: ?*anyopaque, // pointer to underlying data
+    item_type: ItemType = .comment, // type for styling
 };
 
 pub const ListView = struct {
@@ -242,6 +251,16 @@ pub const ListView = struct {
         return &self.items[self.selected];
     }
 
+    fn getTypeIcon(item_type: ItemType) []const u8 {
+        return switch (item_type) {
+            .review_approved => ui.Style.green ++ ui.Style.check ++ ui.Style.reset,
+            .review_changes_requested => ui.Style.red ++ ui.Style.cross ++ ui.Style.reset,
+            .review_commented => ui.Style.blue ++ "●" ++ ui.Style.reset,
+            .review_pending => ui.Style.dim ++ ui.Style.pending ++ ui.Style.reset,
+            .comment => ui.Style.yellow ++ "▸" ++ ui.Style.reset,
+        };
+    }
+
     pub fn render(self: *ListView, term: *Terminal) void {
         term.clear();
         term.moveTo(0, 0);
@@ -260,40 +279,40 @@ pub const ListView = struct {
 
         for (self.items[start..end], start..) |item, i| {
             const is_selected = i == self.selected;
-            const prefix = if (is_selected) ui.Style.current else ui.Style.other;
+            const icon = getTypeIcon(item.item_type);
+            const selector = if (is_selected) ui.Style.blue ++ ui.Style.arrow ++ ui.Style.reset else "  ";
 
             if (is_selected) {
-                ui.print("  {s}{s}{s} {s}{s}{s}", .{
-                    ui.Style.blue,
-                    prefix,
-                    ui.Style.reset,
+                ui.print(" {s} {s} {s}{s}{s}\n", .{
+                    selector,
+                    icon,
                     ui.Style.bold,
                     item.primary,
                     ui.Style.reset,
                 });
             } else {
-                ui.print("  {s}{s}{s} {s}", .{
-                    ui.Style.dim,
-                    prefix,
-                    ui.Style.reset,
+                ui.print(" {s} {s} {s}\n", .{
+                    selector,
+                    icon,
                     item.primary,
                 });
             }
-            ui.print("\n", .{});
 
             if (item.secondary) |sec| {
-                ui.print("       {s}{s}{s}\n", .{ ui.Style.dim, sec, ui.Style.reset });
+                ui.print("        {s}{s}{s}\n", .{ ui.Style.dim, sec, ui.Style.reset });
             }
 
             // Show expanded detail for selected item
             if (is_selected and self.expanded) {
                 if (item.detail) |detail| {
                     ui.print("\n", .{});
+                    ui.print("        {s}───────────────────────────────────────{s}\n", .{ ui.Style.dim, ui.Style.reset });
                     // Print detail with some indentation
                     var lines = std.mem.splitScalar(u8, detail, '\n');
                     while (lines.next()) |line| {
-                        ui.print("       {s}\n", .{line});
+                        ui.print("        {s}\n", .{line});
                     }
+                    ui.print("        {s}───────────────────────────────────────{s}\n", .{ ui.Style.dim, ui.Style.reset });
                     ui.print("\n", .{});
                 }
             }

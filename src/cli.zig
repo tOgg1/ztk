@@ -383,20 +383,39 @@ fn runReviewTUI(allocator: std.mem.Allocator, summary: *const review.PRReviewSum
         if (r.body == null and r.state == .pending) continue;
 
         const state_str = switch (r.state) {
-            .approved => "[APPROVED]",
-            .changes_requested => "[CHANGES REQUESTED]",
-            .commented => "[COMMENTED]",
-            .dismissed => "[DISMISSED]",
-            .pending => "[PENDING]",
+            .approved => "APPROVED",
+            .changes_requested => "CHANGES REQUESTED",
+            .commented => "COMMENTED",
+            .dismissed => "DISMISSED",
+            .pending => "PENDING",
+        };
+
+        const item_type: tui.ItemType = switch (r.state) {
+            .approved => .review_approved,
+            .changes_requested => .review_changes_requested,
+            .commented => .review_commented,
+            else => .review_pending,
         };
 
         // Format primary line
         var primary_buf: [256]u8 = undefined;
-        const primary = std.fmt.bufPrint(&primary_buf, "{s} {s}", .{ state_str, r.author }) catch "Review";
+        const primary = std.fmt.bufPrint(&primary_buf, "{s} - @{s}", .{ state_str, r.author }) catch "Review";
 
         // Store a copy for the list
         const primary_copy = allocator.dupe(u8, primary) catch continue;
-        const secondary_copy: ?[]const u8 = if (r.body) |b| (allocator.dupe(u8, b) catch null) else null;
+
+        // Create a preview for secondary (first 60 chars of body)
+        const secondary_copy: ?[]const u8 = if (r.body) |b| blk: {
+            const preview_len = @min(b.len, 60);
+            var preview_buf: [80]u8 = undefined;
+            var j: usize = 0;
+            for (b[0..preview_len]) |ch| {
+                if (j >= preview_buf.len - 1) break;
+                preview_buf[j] = if (ch == '\n' or ch == '\r') ' ' else ch;
+                j += 1;
+            }
+            break :blk allocator.dupe(u8, preview_buf[0..j]) catch null;
+        } else null;
 
         feedback_refs[idx] = .{ .review_item = r };
         list_items[idx] = .{
@@ -404,6 +423,7 @@ fn runReviewTUI(allocator: std.mem.Allocator, summary: *const review.PRReviewSum
             .secondary = secondary_copy,
             .detail = r.body,
             .context = @ptrCast(@constCast(&feedback_refs[idx])),
+            .item_type = item_type,
         };
         idx += 1;
     }
@@ -438,6 +458,7 @@ fn runReviewTUI(allocator: std.mem.Allocator, summary: *const review.PRReviewSum
             .secondary = secondary_copy,
             .detail = c.body,
             .context = @ptrCast(@constCast(&feedback_refs[idx])),
+            .item_type = .comment,
         };
         idx += 1;
     }
