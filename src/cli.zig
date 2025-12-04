@@ -520,11 +520,12 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
 
     var created: usize = 0;
     var updated: usize = 0;
+    var unchanged: usize = 0;
     var skipped: usize = 0;
 
     for (specs) |spec| {
-        const commit = updated_stk.commits[created + updated + skipped];
-        const is_current = (created + updated + skipped) == updated_stk.commits.len - 1;
+        const commit = updated_stk.commits[created + updated + unchanged + skipped];
+        const is_current = (created + updated + unchanged + skipped) == updated_stk.commits.len - 1;
         const icon = if (is_current) ui.Style.current else ui.Style.other;
         const icon_color = if (is_current) ui.Style.green else ui.Style.blue;
 
@@ -559,12 +560,23 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
         if (existing_pr) |pr| {
             var mutable_pr = pr;
             defer mutable_pr.deinit(allocator);
-            gh_client.updatePR(pr.number, spec.title, spec.body, spec.base_ref) catch |err| {
-                ui.print("    └─ {s}Failed to update PR: {any}{s}\n", .{ ui.Style.red, err, ui.Style.reset });
-                continue;
-            };
-            ui.print("    └─ PR {s}#{d}{s} updated\n", .{ ui.Style.blue, pr.number, ui.Style.reset });
-            updated += 1;
+
+            // Check if anything actually changed
+            const title_changed = !std.mem.eql(u8, pr.title, spec.title);
+            const body_changed = !std.mem.eql(u8, pr.body, spec.body);
+            const base_changed = !std.mem.eql(u8, pr.base_ref, spec.base_ref);
+
+            if (title_changed or body_changed or base_changed) {
+                gh_client.updatePR(pr.number, spec.title, spec.body, spec.base_ref) catch |err| {
+                    ui.print("    └─ {s}Failed to update PR: {any}{s}\n", .{ ui.Style.red, err, ui.Style.reset });
+                    continue;
+                };
+                ui.print("    └─ PR {s}#{d}{s} updated\n", .{ ui.Style.blue, pr.number, ui.Style.reset });
+                updated += 1;
+            } else {
+                ui.print("    └─ PR {s}#{d}{s} unchanged\n", .{ ui.Style.dim, pr.number, ui.Style.reset });
+                unchanged += 1;
+            }
         } else {
             const new_pr = gh_client.createPR(spec.branch_name, spec.base_ref, spec.title, spec.body) catch |err| {
                 ui.print("    └─ {s}Failed to create PR: {any}{s}\n", .{ ui.Style.red, err, ui.Style.reset });
@@ -582,15 +594,26 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
         ui.Style.green,
         ui.Style.check,
         ui.Style.reset,
-        created + updated,
-        if (created + updated == 1) "" else "s",
+        created + updated + unchanged,
+        if (created + updated + unchanged == 1) "" else "s",
     });
-    if (created > 0) {
-        ui.print(" ({d} created", .{created});
-        if (updated > 0) ui.print(", {d} updated", .{updated});
+    if (created > 0 or updated > 0 or unchanged > 0) {
+        ui.print(" (", .{});
+        var first = true;
+        if (created > 0) {
+            ui.print("{d} created", .{created});
+            first = false;
+        }
+        if (updated > 0) {
+            if (!first) ui.print(", ", .{});
+            ui.print("{d} updated", .{updated});
+            first = false;
+        }
+        if (unchanged > 0) {
+            if (!first) ui.print(", ", .{});
+            ui.print("{d} unchanged", .{unchanged});
+        }
         ui.print(")", .{});
-    } else if (updated > 0) {
-        ui.print(" ({d} updated)", .{updated});
     }
     if (skipped > 0) {
         ui.print(", {s}{d} WIP skipped{s}", .{ ui.Style.yellow, skipped, ui.Style.reset });
