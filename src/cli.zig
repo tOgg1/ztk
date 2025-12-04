@@ -4,6 +4,10 @@ const config = @import("config.zig");
 const git = @import("git.zig");
 const stack = @import("stack.zig");
 const github = @import("github.zig");
+const review = @import("review.zig");
+const tui = @import("tui.zig");
+const clipboard = @import("clipboard.zig");
+const prompt = @import("prompt.zig");
 
 pub const Command = enum {
     init,
@@ -13,6 +17,7 @@ pub const Command = enum {
     modify,
     absorb,
     merge,
+    review_cmd,
     help,
 
     pub fn fromString(str: []const u8) ?Command {
@@ -31,6 +36,10 @@ pub const Command = enum {
             .{ "ab", .absorb },
             .{ "merge", .merge },
             .{ "m", .merge },
+            .{ "review", .review_cmd },
+            .{ "r", .review_cmd },
+            .{ "rv", .review_cmd },
+            .{ "feedback", .review_cmd },
             .{ "help", .help },
             .{ "--help", .help },
             .{ "-h", .help },
@@ -56,6 +65,7 @@ pub fn handleCommand(allocator: std.mem.Allocator, args: []const [:0]const u8) !
             .modify => cmdModify(allocator),
             .absorb => cmdAbsorb(allocator),
             .merge => cmdMerge(allocator, args),
+            .review_cmd => cmdReview(allocator, args),
             .help => printUsage(),
         }
     } else {
@@ -1450,6 +1460,315 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
     ui.print("\n", .{});
 }
 
+/// Union to hold either a Review or ReviewComment for the TUI
+const FeedbackItem = union(enum) {
+    comment: review.ReviewComment,
+    review_summary: review.Review,
+};
+
+fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
+    // Parse arguments
+    var pr_number: ?u32 = null;
+    var list_mode = false;
+
+    var i: usize = 2;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--pr") or std.mem.eql(u8, arg, "-p")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                pr_number = std.fmt.parseInt(u32, args[i], 10) catch {
+                    ui.printError("Invalid PR number: {s}\n", .{args[i]});
+                    return;
+                };
+            } else {
+                ui.printError("--pr requires a PR number\n", .{});
+                return;
+            }
+        } else if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
+            list_mode = true;
+        }
+    }
+
+    const cfg = config.load(allocator) catch |err| {
+        switch (err) {
+            config.ConfigError.ConfigNotFound => {
+                ui.printError("Not initialized. Run 'ztk init' first.\n", .{});
+            },
+            config.ConfigError.NotInGitRepo => {
+                ui.printError("Not in a git repository.\n", .{});
+            },
+            else => {
+                ui.printError("Failed to load config: {any}\n", .{err});
+            },
+        }
+        return;
+    };
+    defer {
+        var c = cfg;
+        c.deinit(allocator);
+    }
+
+    var gh_client = github.Client.init(allocator, cfg) catch |err| {
+        if (err == github.GitHubError.NoToken) {
+            ui.printError("No GitHub token. Set GITHUB_TOKEN or install gh CLI.\n", .{});
+        } else {
+            ui.printError("Failed to init GitHub client: {any}\n", .{err});
+        }
+        return;
+    };
+    defer gh_client.deinit();
+
+    // If no PR specified, find the PR for the current branch
+    const target_pr = if (pr_number) |num| num else blk: {
+        const stk = stack.readStack(allocator, cfg) catch |err| {
+            ui.printError("Failed to read stack: {any}\n", .{err});
+            return;
+        };
+        defer {
+            var s = stk;
+            s.deinit(allocator);
+        }
+
+        if (stk.commits.len == 0) {
+            ui.printError("No commits in stack. Nothing to review.\n", .{});
+            return;
+        }
+
+        // Find PR for top commit
+        const top_commit = stk.commits[stk.commits.len - 1];
+        const id_suffix = if (top_commit.ztk_id) |id|
+            id[0..@min(8, id.len)]
+        else
+            top_commit.short_sha;
+
+        var branch_buf: [256]u8 = undefined;
+        const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
+            stk.head_branch,
+            id_suffix,
+        }) catch {
+            ui.printError("Buffer overflow\n", .{});
+            return;
+        };
+
+        if (gh_client.findPR(branch_name) catch null) |pr| {
+            defer {
+                var mutable_pr = pr;
+                mutable_pr.deinit(allocator);
+            }
+            break :blk pr.number;
+        } else {
+            ui.printError("No PR found for current branch. Run 'ztk update' first.\n", .{});
+            return;
+        }
+    };
+
+    // Get review summary
+    var summary = gh_client.getPRReviewSummary(target_pr) catch |err| {
+        ui.printError("Failed to get PR review summary: {any}\n", .{err});
+        return;
+    };
+    defer summary.deinit(allocator);
+
+    if (list_mode) {
+        printReviewList(allocator, &summary);
+    } else {
+        runReviewTUI(allocator, &summary);
+    }
+}
+
+fn printReviewList(allocator: std.mem.Allocator, summary: *review.PRReviewSummary) void {
+    _ = allocator;
+
+    ui.print("\n", .{});
+    ui.print("  {s}PR #{d}: {s}{s}\n", .{
+        ui.Style.bold,
+        summary.pr_number,
+        summary.pr_title,
+        ui.Style.reset,
+    });
+    ui.print("  {s}{s}{s}\n\n", .{ ui.Style.dim, summary.pr_url, ui.Style.reset });
+
+    if (summary.reviews.len == 0 and summary.comments.len == 0) {
+        ui.print("  {s}No review feedback yet.{s}\n\n", .{ ui.Style.dim, ui.Style.reset });
+        return;
+    }
+
+    // Print reviews
+    for (summary.reviews) |rv| {
+        if (rv.state == .pending) continue;
+        if (rv.body == null) continue;
+
+        const icon = switch (rv.state) {
+            .approved => ui.Style.green ++ ui.Style.check ++ ui.Style.reset,
+            .changes_requested => ui.Style.red ++ ui.Style.cross ++ ui.Style.reset,
+            .commented => ui.Style.blue ++ "●" ++ ui.Style.reset,
+            else => ui.Style.dim ++ ui.Style.pending ++ ui.Style.reset,
+        };
+
+        ui.print("  {s} {s}{s}{s} ({s})\n", .{
+            icon,
+            ui.Style.bold,
+            rv.author,
+            ui.Style.reset,
+            rv.state.toString(),
+        });
+        if (rv.body) |body| {
+            ui.print("    {s}\n", .{body});
+        }
+        ui.print("\n", .{});
+    }
+
+    // Print inline comments
+    for (summary.comments) |comment| {
+        ui.print("  {s}▸{s} {s}{s}{s}", .{
+            ui.Style.yellow,
+            ui.Style.reset,
+            ui.Style.bold,
+            comment.author,
+            ui.Style.reset,
+        });
+        if (comment.path) |path| {
+            if (comment.line) |line| {
+                ui.print(" on {s}{s}:{d}{s}", .{ ui.Style.dim, path, line, ui.Style.reset });
+            } else {
+                ui.print(" on {s}{s}{s}", .{ ui.Style.dim, path, ui.Style.reset });
+            }
+        }
+        ui.print("\n", .{});
+        ui.print("    {s}\n\n", .{comment.body});
+    }
+
+    ui.print("  {s}Total: {d} feedback item{s}{s}\n\n", .{
+        ui.Style.dim,
+        summary.feedbackCount(),
+        if (summary.feedbackCount() == 1) "" else "s",
+        ui.Style.reset,
+    });
+}
+
+fn runReviewTUI(allocator: std.mem.Allocator, summary: *review.PRReviewSummary) void {
+    // Build list items for TUI
+    var items = std.ArrayListUnmanaged(tui.ListItem){};
+    defer items.deinit(allocator);
+
+    var feedback_items = std.ArrayListUnmanaged(FeedbackItem){};
+    defer feedback_items.deinit(allocator);
+
+    // Add reviews with bodies
+    for (summary.reviews) |rv| {
+        if (rv.state == .pending) continue;
+        if (rv.body == null) continue;
+
+        const item_type: tui.ItemType = switch (rv.state) {
+            .approved => .review_approved,
+            .changes_requested => .review_changes_requested,
+            .commented => .review_commented,
+            else => .review_pending,
+        };
+
+        // Append both items atomically - if one fails, don't add either
+        items.append(allocator, .{
+            .primary = rv.author,
+            .secondary = rv.state.toString(),
+            .detail = rv.body,
+            .context = null,
+            .item_type = item_type,
+        }) catch continue;
+
+        feedback_items.append(allocator, .{ .review_summary = rv }) catch {
+            // Roll back the items append to keep lists in sync
+            _ = items.pop();
+            continue;
+        };
+    }
+
+    // Add inline comments
+    // Store allocated secondary strings to free later
+    var secondary_strings = std.ArrayListUnmanaged([]const u8){};
+    defer {
+        for (secondary_strings.items) |s| allocator.free(s);
+        secondary_strings.deinit(allocator);
+    }
+
+    for (summary.comments) |comment| {
+        const secondary: ?[]const u8 = if (comment.path) |path| blk: {
+            if (comment.line) |line| {
+                const formatted = std.fmt.allocPrint(allocator, "{s}:{d}", .{ path, line }) catch break :blk path;
+                secondary_strings.append(allocator, formatted) catch {
+                    allocator.free(formatted);
+                    break :blk path;
+                };
+                break :blk formatted;
+            } else {
+                break :blk path;
+            }
+        } else null;
+
+        // Append both items atomically - if one fails, don't add either
+        items.append(allocator, .{
+            .primary = comment.author,
+            .secondary = secondary,
+            .detail = comment.body,
+            .context = null,
+            .item_type = .comment,
+        }) catch continue;
+
+        feedback_items.append(allocator, .{ .comment = comment }) catch {
+            // Roll back the items append to keep lists in sync
+            _ = items.pop();
+            continue;
+        };
+    }
+
+    if (items.items.len == 0) {
+        ui.print("\n  {s}No review feedback yet.{s}\n\n", .{ ui.Style.dim, ui.Style.reset });
+        return;
+    }
+
+    const result = tui.runInteractive(allocator, items.items) catch |err| {
+        ui.printError("TUI error: {any}\n", .{err});
+        return;
+    };
+
+    switch (result.action) {
+        .quit => {},
+        .copy_raw => {
+            if (result.selected < feedback_items.items.len) {
+                const item = feedback_items.items[result.selected];
+                const text = switch (item) {
+                    .comment => |c| c.body,
+                    .review_summary => |rv| rv.body orelse "",
+                };
+                clipboard.copyWithFeedback(allocator, text);
+            }
+        },
+        .copy_llm => {
+            if (result.selected < feedback_items.items.len) {
+                const item = feedback_items.items[result.selected];
+                const context = prompt.PromptContext{
+                    .pr_title = summary.pr_title,
+                    .pr_number = summary.pr_number,
+                    .branch = summary.branch,
+                };
+
+                const formatted = switch (item) {
+                    .comment => |c| prompt.formatCommentFull(allocator, c, context) catch {
+                        ui.printError("Failed to format prompt\n", .{});
+                        return;
+                    },
+                    .review_summary => |rv| prompt.formatReview(allocator, rv, context) catch {
+                        ui.printError("Failed to format prompt\n", .{});
+                        return;
+                    },
+                };
+                defer allocator.free(formatted);
+                clipboard.copyWithFeedback(allocator, formatted);
+            }
+        },
+    }
+}
+
 fn printUsage() void {
     const usage =
         \\ztk - Stacked Pull Requests on GitHub
@@ -1465,12 +1784,17 @@ fn printUsage() void {
         \\    modify            Amend a commit in the middle of the stack
         \\    absorb, a, ab     Auto-amend staged changes into relevant commits
         \\    merge, m          Merge all mergeable PRs (top PR targets main, lower PRs closed)
+        \\    review, r, rv     View and copy PR review feedback (interactive TUI)
         \\    help, --help, -h  Show this help message
         \\
         \\MERGE OPTIONS:
         \\    -r, --rebase      Rebase current branch onto updated main after merge
         \\    -n, --no-review   Merge without requiring an approved review
         \\    -f, --force       Force merge (only blocked by merge conflicts)
+        \\
+        \\REVIEW OPTIONS:
+        \\    --pr, -p <NUM>    Show feedback for specific PR number
+        \\    --list, -l        Print feedback as a list (non-interactive)
         \\
         \\EXAMPLES:
         \\    ztk init          # Initialize ztk config
@@ -1481,6 +1805,8 @@ fn printUsage() void {
         \\    ztk absorb        # Auto-absorb staged changes
         \\    ztk merge         # Merge ready PRs
         \\    ztk merge -r      # Merge and rebase local branch
+        \\    ztk review        # Interactive review feedback TUI
+        \\    ztk review --list # Print feedback as list
         \\
     ;
     ui.print("{s}", .{usage});
