@@ -95,6 +95,7 @@ pub const PullRequest = struct {
     head_ref: []const u8,
     base_ref: []const u8,
     title: []const u8,
+    body: []const u8,
     head_sha: []const u8,
     mergeable: ?bool,
 
@@ -104,6 +105,7 @@ pub const PullRequest = struct {
         allocator.free(self.head_ref);
         allocator.free(self.base_ref);
         allocator.free(self.title);
+        allocator.free(self.body);
         allocator.free(self.head_sha);
     }
 };
@@ -481,6 +483,13 @@ pub const Client = struct {
         errdefer self.allocator.free(base_ref);
 
         const title = self.allocator.dupe(u8, obj.get("title").?.string) catch return GitHubError.OutOfMemory;
+        errdefer self.allocator.free(title);
+
+        const body_val = obj.get("body");
+        const body = if (body_val) |bv| switch (bv) {
+            .string => |s| self.allocator.dupe(u8, s) catch return GitHubError.OutOfMemory,
+            else => self.allocator.dupe(u8, "") catch return GitHubError.OutOfMemory,
+        } else self.allocator.dupe(u8, "") catch return GitHubError.OutOfMemory;
 
         const mergeable: ?bool = if (obj.get("mergeable")) |m| switch (m) {
             .bool => |b| b,
@@ -494,6 +503,7 @@ pub const Client = struct {
             .head_ref = head_ref,
             .base_ref = base_ref,
             .title = title,
+            .body = body,
             .head_sha = head_sha,
             .mergeable = mergeable,
         };
