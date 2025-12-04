@@ -1,4 +1,5 @@
 const std = @import("std");
+const review = @import("review.zig");
 const config = @import("config.zig");
 
 pub const CheckStatus = enum {
@@ -396,8 +397,8 @@ pub const Client = struct {
         var latest_by_user = std.StringHashMap([]const u8).init(self.allocator);
         defer latest_by_user.deinit();
 
-        for (reviews) |review| {
-            const review_obj = review.object;
+        for (reviews) |rv| {
+            const review_obj = rv.object;
             const user_obj = review_obj.get("user") orelse continue;
             const login = user_obj.object.get("login") orelse continue;
             const state = review_obj.get("state") orelse continue;
@@ -460,6 +461,239 @@ pub const Client = struct {
         const pr = array.items[0].object;
         const merged_at = pr.get("merged_at") orelse return false;
         return merged_at != .null;
+    }
+
+    /// Fetch all reviews for a PR
+    pub fn listReviews(self: *Client, pr_number: u32) GitHubError![]review.Review {
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/repos/{s}/{s}/pulls/{d}/reviews", .{
+            self.owner,
+            self.repo,
+            pr_number,
+        }) catch return GitHubError.OutOfMemory;
+
+        const response = self.request("GET", path, null) catch return GitHubError.RequestFailed;
+        defer self.allocator.free(response);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, response, .{}) catch {
+            return GitHubError.ParseError;
+        };
+        defer parsed.deinit();
+
+        // Validate that response is an array
+        if (parsed.value != .array) return GitHubError.ParseError;
+        const array = parsed.value.array;
+        var reviews: std.ArrayListUnmanaged(review.Review) = .empty;
+        errdefer {
+            for (reviews.items) |*r| {
+                r.deinit(self.allocator);
+            }
+            reviews.deinit(self.allocator);
+        }
+
+        for (array.items) |item| {
+            const obj = item.object;
+
+            const state_str = obj.get("state").?.string;
+            const state = review.ReviewState.fromString(state_str) orelse continue;
+
+            // Skip pending reviews
+            if (state == .pending) continue;
+
+            const id = @as(u64, @intCast(obj.get("id").?.integer));
+
+            const user_obj = obj.get("user").?.object;
+            const author = self.allocator.dupe(u8, user_obj.get("login").?.string) catch return GitHubError.OutOfMemory;
+            errdefer self.allocator.free(author);
+
+            const submitted_at_val = obj.get("submitted_at");
+            const submitted_at = if (submitted_at_val) |v|
+                if (v == .string) self.allocator.dupe(u8, v.string) catch return GitHubError.OutOfMemory else self.allocator.dupe(u8, "") catch return GitHubError.OutOfMemory
+            else
+                self.allocator.dupe(u8, "") catch return GitHubError.OutOfMemory;
+            errdefer self.allocator.free(submitted_at);
+
+            const body_val = obj.get("body");
+            const body_text: ?[]const u8 = if (body_val) |v| switch (v) {
+                .string => |s| if (s.len > 0) self.allocator.dupe(u8, s) catch return GitHubError.OutOfMemory else null,
+                else => null,
+            } else null;
+            errdefer if (body_text) |b| self.allocator.free(b);
+
+            reviews.append(self.allocator, .{
+                .id = id,
+                .state = state,
+                .body = body_text,
+                .author = author,
+                .submitted_at = submitted_at,
+            }) catch return GitHubError.OutOfMemory;
+        }
+
+        return reviews.toOwnedSlice(self.allocator) catch return GitHubError.OutOfMemory;
+    }
+
+    /// Fetch all review comments (inline comments) for a PR
+    pub fn listReviewComments(self: *Client, pr_number: u32) GitHubError![]review.ReviewComment {
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/repos/{s}/{s}/pulls/{d}/comments", .{
+            self.owner,
+            self.repo,
+            pr_number,
+        }) catch return GitHubError.OutOfMemory;
+
+        const response = self.request("GET", path, null) catch return GitHubError.RequestFailed;
+        defer self.allocator.free(response);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, response, .{}) catch {
+            return GitHubError.ParseError;
+        };
+        defer parsed.deinit();
+
+        // Validate that response is an array
+        if (parsed.value != .array) return GitHubError.ParseError;
+        const array = parsed.value.array;
+        var comments: std.ArrayListUnmanaged(review.ReviewComment) = .empty;
+        errdefer {
+            for (comments.items) |*c| {
+                c.deinit(self.allocator);
+            }
+            comments.deinit(self.allocator);
+        }
+
+        for (array.items) |item| {
+            const obj = item.object;
+
+            const id = @as(u64, @intCast(obj.get("id").?.integer));
+
+            const body_val = obj.get("body").?;
+            const body = self.allocator.dupe(u8, body_val.string) catch return GitHubError.OutOfMemory;
+            errdefer self.allocator.free(body);
+
+            const path_val = obj.get("path");
+            const file_path: ?[]const u8 = if (path_val) |v| switch (v) {
+                .string => |s| self.allocator.dupe(u8, s) catch return GitHubError.OutOfMemory,
+                else => null,
+            } else null;
+            errdefer if (file_path) |p| self.allocator.free(p);
+
+            const line_val = obj.get("line");
+            const line: ?u32 = if (line_val) |v| switch (v) {
+                .integer => |i| @intCast(i),
+                else => null,
+            } else null;
+
+            const original_line_val = obj.get("original_line");
+            const original_line: ?u32 = if (original_line_val) |v| switch (v) {
+                .integer => |i| @intCast(i),
+                else => null,
+            } else null;
+
+            const diff_hunk_val = obj.get("diff_hunk");
+            const diff_hunk: ?[]const u8 = if (diff_hunk_val) |v| switch (v) {
+                .string => |s| self.allocator.dupe(u8, s) catch return GitHubError.OutOfMemory,
+                else => null,
+            } else null;
+            errdefer if (diff_hunk) |d| self.allocator.free(d);
+
+            const user_obj = obj.get("user").?.object;
+            const author = self.allocator.dupe(u8, user_obj.get("login").?.string) catch return GitHubError.OutOfMemory;
+            errdefer self.allocator.free(author);
+
+            const created_at = self.allocator.dupe(u8, obj.get("created_at").?.string) catch return GitHubError.OutOfMemory;
+            errdefer self.allocator.free(created_at);
+
+            const in_reply_to_val = obj.get("in_reply_to_id");
+            const in_reply_to_id: ?u64 = if (in_reply_to_val) |v| switch (v) {
+                .integer => |i| @intCast(i),
+                else => null,
+            } else null;
+
+            comments.append(self.allocator, .{
+                .id = id,
+                .body = body,
+                .path = file_path,
+                .line = line,
+                .original_line = original_line,
+                .diff_hunk = diff_hunk,
+                .author = author,
+                .created_at = created_at,
+                .in_reply_to_id = in_reply_to_id,
+            }) catch return GitHubError.OutOfMemory;
+        }
+
+        return comments.toOwnedSlice(self.allocator) catch return GitHubError.OutOfMemory;
+    }
+
+    /// Get a PR by number
+    pub fn getPR(self: *Client, pr_number: u32) GitHubError!PullRequest {
+        var path_buf: [256]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/repos/{s}/{s}/pulls/{d}", .{
+            self.owner,
+            self.repo,
+            pr_number,
+        }) catch return GitHubError.OutOfMemory;
+
+        const response = self.request("GET", path, null) catch return GitHubError.RequestFailed;
+        defer self.allocator.free(response);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, response, .{}) catch {
+            return GitHubError.ParseError;
+        };
+        defer parsed.deinit();
+
+        return self.parsePR(parsed.value.object);
+    }
+
+    /// Fetch complete review summary for a PR (reviews + inline comments)
+    pub fn getPRReviewSummary(self: *Client, pr_number: u32) GitHubError!review.PRReviewSummary {
+        // Fetch PR details
+        const pr = try self.getPR(pr_number);
+        errdefer {
+            var p = pr;
+            p.deinit(self.allocator);
+        }
+
+        // Fetch reviews
+        const reviews = try self.listReviews(pr_number);
+        errdefer {
+            for (reviews) |*r| {
+                var rv = r;
+                rv.deinit(self.allocator);
+            }
+            self.allocator.free(reviews);
+        }
+
+        // Fetch inline comments
+        const comments = try self.listReviewComments(pr_number);
+        errdefer {
+            for (comments) |*c| {
+                var cm = c;
+                cm.deinit(self.allocator);
+            }
+            self.allocator.free(comments);
+        }
+
+        // Duplicate strings we need to keep (PR struct will be freed)
+        const pr_title = self.allocator.dupe(u8, pr.title) catch return GitHubError.OutOfMemory;
+        errdefer self.allocator.free(pr_title);
+
+        const pr_url = self.allocator.dupe(u8, pr.html_url) catch return GitHubError.OutOfMemory;
+        errdefer self.allocator.free(pr_url);
+
+        const branch = self.allocator.dupe(u8, pr.head_ref) catch return GitHubError.OutOfMemory;
+
+        // Clean up PR now that we've copied what we need
+        var p = pr;
+        p.deinit(self.allocator);
+
+        return .{
+            .pr_number = pr_number,
+            .pr_title = pr_title,
+            .pr_url = pr_url,
+            .branch = branch,
+            .reviews = reviews,
+            .comments = comments,
+        };
     }
 
     fn parsePR(self: *Client, obj: std.json.ObjectMap) GitHubError!PullRequest {
