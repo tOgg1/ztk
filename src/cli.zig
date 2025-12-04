@@ -1181,9 +1181,17 @@ fn cmdAbsorb(allocator: std.mem.Allocator) void {
 
 fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
     var auto_rebase = false;
+    var skip_review = false;
+    var force = false;
     for (args[2..]) |arg| {
         if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--rebase")) {
             auto_rebase = true;
+        }
+        if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-review")) {
+            skip_review = true;
+        }
+        if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+            force = true;
         }
     }
 
@@ -1280,9 +1288,12 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
 
             const status = gh_client.getPRStatus(found_pr);
 
-            const is_mergeable = status.checks == .success and
-                status.review == .approved and
-                status.mergeable != .conflicting;
+            const is_mergeable = if (force)
+                status.mergeable != .conflicting
+            else
+                status.checks == .success and
+                    (skip_review or status.review == .approved) and
+                    status.mergeable != .conflicting;
 
             const branch_copy = allocator.dupe(u8, branch_name) catch continue;
 
@@ -1435,6 +1446,8 @@ fn printUsage() void {
         \\
         \\MERGE OPTIONS:
         \\    -r, --rebase      Rebase current branch onto updated main after merge
+        \\    -n, --no-review   Merge without requiring an approved review
+        \\    -f, --force       Force merge (only blocked by merge conflicts)
         \\
         \\EXAMPLES:
         \\    ztk init          # Initialize ztk config
