@@ -1,0 +1,127 @@
+---
+title: review
+description: View and copy PR review feedback
+---
+
+# ztk review
+
+View review feedback for PRs in your stack with an interactive TUI.
+
+## Usage
+
+```bash
+ztk review
+ztk r       # alias
+ztk rv      # alias
+```
+
+## Options
+
+| Flag | Description |
+|------|-------------|
+| `-p`, `--pr <NUM>` | Show feedback for a specific PR number |
+| `-l`, `--list` | Print feedback as a list (non-interactive) |
+
+## Description
+
+The `review` command fetches all review comments and feedback for a PR and displays them in an interactive terminal UI. This makes it easy to:
+
+- See all feedback in one place
+- Navigate between comments
+- Copy feedback to clipboard for addressing
+
+By default, it shows feedback for the PR associated with your current (top) commit.
+
+## Interactive TUI
+
+Running `ztk review` opens an interactive interface:
+
+```
+┌─ PR #47: Add authentication middleware ─────────────────────────┐
+│                                                                  │
+│  Reviews:                                                        │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │ @alice · CHANGES_REQUESTED                                   ││
+│  │ Please add error handling for the token validation           ││
+│  └──────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  Inline Comments:                                                │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │ src/auth.go:42                                               ││
+│  │ @bob: This could panic if the token is nil                   ││
+│  └──────────────────────────────────────────────────────────────┘│
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │ src/auth.go:67                                               ││
+│  │ @alice: Consider using a constant for the expiry time        ││
+│  └──────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  [↑/↓] Navigate  [Enter] Copy  [q] Quit                         │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Controls
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Move up |
+| `↓` / `j` | Move down |
+| `Enter` | Copy selected comment to clipboard |
+| `q` / `Esc` | Quit |
+
+## List Mode
+
+Use `--list` for non-interactive output, useful for scripting or quick review:
+
+```bash
+ztk review --list
+```
+
+```
+  PR #47: Add authentication middleware
+
+  Reviews:
+    @alice · CHANGES_REQUESTED
+    Please add error handling for the token validation
+
+  Inline Comments:
+    src/auth.go:42
+    @bob: This could panic if the token is nil
+
+    src/auth.go:67
+    @alice: Consider using a constant for the expiry time
+```
+
+## Specific PR
+
+View feedback for a specific PR by number:
+
+```bash
+ztk review --pr 45
+```
+
+## Workflow
+
+A typical review workflow:
+
+```bash
+# Check what feedback you have
+ztk review
+
+# Copy a comment, then fix the issue
+# Press Enter on a comment to copy it
+
+# Stage your fix
+git add src/auth.go
+
+# Absorb into the right commit
+ztk absorb -u
+
+# Or manually modify
+ztk modify -u
+```
+
+## See Also
+
+- [status](/docs/commands/status) — See review status at a glance
+- [modify](/docs/commands/modify) — Address feedback by amending commits
+- [absorb](/docs/commands/absorb) — Auto-route fixes to commits

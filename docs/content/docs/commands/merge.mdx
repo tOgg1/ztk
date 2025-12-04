@@ -1,0 +1,105 @@
+---
+title: merge
+description: Merge all mergeable PRs in your stack
+---
+
+# ztk merge
+
+Merge all mergeable pull requests in your stack, from bottom to top.
+
+## Usage
+
+```bash
+ztk merge
+ztk m       # alias
+```
+
+## Options
+
+| Flag | Description |
+|------|-------------|
+| `-r`, `--rebase` | Rebase current branch onto updated main after merge |
+| `-n`, `--no-review` | Merge without requiring an approved review |
+| `-f`, `--force` | Force merge (only blocked by merge conflicts) |
+
+## Description
+
+The `merge` command identifies PRs that are ready to merge and merges them bottom-up. This is the proper way to merge stacked PRs — start from the bottom so that each subsequent PR's base automatically updates.
+
+### What "Mergeable" Means
+
+By default, a PR is considered mergeable if:
+- ✅ CI checks are passing
+- ✅ Has at least one approved review
+- ✅ No merge conflicts
+
+With `--no-review`, the approval requirement is skipped.
+With `--force`, only merge conflicts block the merge.
+
+## Output Example
+
+```
+  Checking PRs for merge...
+
+  ◯ Add core utilities
+  │  #45 · ✓ Checks · ✓ Approved · ✓ Mergeable
+  │
+  ◯ Add database layer
+  │  #46 · ✓ Checks · ✓ Approved · ✓ Mergeable
+  │
+  ◉ Add API endpoints
+  │  #47 · ✓ Checks · ⏳ Awaiting review · ✗ Not mergeable
+
+  Merge 2 PRs? [y/N]: y
+
+  Merging #45... ✓ merged
+  Merging #46... ✓ merged
+
+  ✓ Merged 2 PRs
+
+  Run 'ztk sync' to update your local branch.
+```
+
+## With --rebase
+
+The `--rebase` flag automatically rebases your local branch after merging:
+
+```bash
+ztk merge --rebase
+```
+
+```
+  Merging #45... ✓ merged
+  Merging #46... ✓ merged
+
+  ✓ Merged 2 PRs
+
+  Rebasing onto origin/main... done
+  ✓ Local branch updated
+```
+
+## Force Merge
+
+Use `--force` when you need to merge without waiting for reviews or CI:
+
+```bash
+ztk merge --force
+```
+
+<Callout type="warn">
+  Force merging bypasses safety checks. Only use when you're confident the code is ready.
+</Callout>
+
+## How Stacked Merges Work
+
+When you merge the bottom PR:
+1. GitHub merges it into `main`
+2. GitHub automatically retargets the next PR to `main`
+3. The next PR is now ready to merge
+
+This is why ztk merges bottom-up — it's the natural flow for stacked PRs.
+
+## See Also
+
+- [status](/docs/commands/status) — Check which PRs are mergeable
+- [sync](/docs/commands/sync) — Clean up after merging

@@ -1,0 +1,60 @@
+---
+title: open
+description: Open a PR in the browser
+---
+
+# ztk open
+
+Open pull requests from your stack in your default browser.
+
+## Usage
+
+```bash
+ztk open
+ztk o       # alias
+```
+
+## Description
+
+The `open` command opens PR pages on GitHub in your default browser. 
+
+- If there's **one PR** in your stack, it opens immediately
+- If there are **multiple PRs**, you get an interactive selection
+
+## Single PR
+
+When your stack has one PR:
+
+```bash
+$ ztk open
+  Opening PR #47: Add authentication middleware
+```
+
+Your browser opens to `https://github.com/owner/repo/pull/47`.
+
+## Multiple PRs
+
+When you have multiple PRs, ztk shows a selection menu:
+
+```
+  Select a PR to open:
+
+    [1] #47 Add authentication middleware
+    [2] #46 Add database layer
+    [3] #45 Add core utilities
+
+  Enter number (1-3): 
+```
+
+Enter a number to open that PR, or press Enter/q to cancel.
+
+## Use Cases
+
+- Quickly jump to a PR to check CI status
+- Open a PR to respond to review comments
+- Share the PR link with teammates
+
+## See Also
+
+- [status](/docs/commands/status) — See all PRs and their status
+- [review](/docs/commands/review) — View review feedback in terminal

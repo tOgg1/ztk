@@ -11,9 +11,16 @@ Automatically route staged changes to the commits that originally introduced the
 
 ```bash
 ztk absorb
-ztk a       # alias
-ztk ab      # alias
+ztk a          # alias
+ztk ab         # alias
+ztk absorb -u  # absorb and update PRs
 ```
+
+## Options
+
+| Flag | Description |
+|------|-------------|
+| `-u`, `--update` | Run `ztk update` automatically after absorbing |
 
 ## Prerequisites
 
@@ -83,11 +90,16 @@ vim src/api.go      # Fix in commit 3
 # Stage all fixes
 git add -A
 
-# Let absorb figure out where each fix belongs
-ztk absorb
+# Let absorb figure out where each fix belongs and update PRs
+ztk absorb -u
+```
 
-# Push updated stack
-ztk update
+Or without the `-u` flag:
+
+```bash
+git add -A
+ztk absorb
+ztk update   # separate step
 ```
 
 ## Comparison with modify
