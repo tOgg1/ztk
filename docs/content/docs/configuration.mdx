@@ -1,0 +1,135 @@
+---
+title: Configuration
+description: Configure ztk for your repository
+---
+
+# Configuration
+
+ztk uses a `.ztk.json` file in your repository root for configuration.
+
+## Config File
+
+Running `ztk init` creates a config file like:
+
+```json
+{
+  "owner": "your-username",
+  "repo": "your-repo",
+  "main_branch": "main",
+  "remote": "origin"
+}
+```
+
+## Options
+
+### owner
+
+**Required.** The GitHub username or organization that owns the repository.
+
+```json
+{
+  "owner": "mycompany"
+}
+```
+
+### repo
+
+**Required.** The GitHub repository name.
+
+```json
+{
+  "repo": "my-project"
+}
+```
+
+### main_branch
+
+**Required.** The name of your main/trunk branch. ztk creates PRs targeting this branch.
+
+```json
+{
+  "main_branch": "main"
+}
+```
+
+Common values: `main`, `master`, `develop`
+
+### remote
+
+**Optional.** The Git remote name. Defaults to `origin`.
+
+```json
+{
+  "remote": "origin"
+}
+```
+
+## Environment Variables
+
+### GITHUB_TOKEN
+
+GitHub personal access token for API authentication. Required if you don't have `gh` CLI installed.
+
+```bash
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+```
+
+The token needs `repo` scope for private repositories.
+
+### Using gh CLI
+
+If you have the [GitHub CLI](https://cli.github.com/) installed and authenticated, ztk will use it automatically. No token needed.
+
+```bash
+gh auth login
+```
+
+## Example Configurations
+
+### Standard Setup
+
+```json
+{
+  "owner": "acme",
+  "repo": "widgets",
+  "main_branch": "main",
+  "remote": "origin"
+}
+```
+
+### Develop Branch Workflow
+
+```json
+{
+  "owner": "acme", 
+  "repo": "widgets",
+  "main_branch": "develop",
+  "remote": "origin"
+}
+```
+
+### Fork Workflow
+
+When working on a fork, you might have:
+- `origin` → your fork
+- `upstream` → the original repo
+
+For PRs to your own fork:
+
+```json
+{
+  "owner": "your-username",
+  "repo": "forked-repo",
+  "main_branch": "main",
+  "remote": "origin"
+}
+```
+
+## Committing Config
+
+We recommend committing `.ztk.json` to your repository so all team members can use ztk with the same configuration.
+
+```bash
+git add .ztk.json
+git commit -m "Add ztk configuration"
+```

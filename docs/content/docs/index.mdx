@@ -1,0 +1,69 @@
+---
+title: Introduction
+description: ztk - A beautiful stacked PR workflow tool for Git
+---
+
+# ztk
+
+**ztk** is a CLI tool for managing stacked pull requests with a beautiful, Graphite-inspired terminal interface. Written in Zig for speed and simplicity.
+
+## Why Stacked PRs?
+
+Traditional Git workflows often result in large, monolithic PRs that are:
+- Difficult to review thoroughly
+- Slow to get through code review
+- Risky to merge due to their size
+
+Stacked PRs break changes into smaller, focused commits where **each commit becomes its own PR**. This makes code review faster, safer, and more effective.
+
+## Why ztk?
+
+```
+  Stack: feature/auth  (3 commits ahead of main)
+
+  ◉  Add authentication middleware           ← you are here
+  │  #47 · ✓ Checks · ✓ Approved · Ready to merge
+  │
+  ◯  Add user database schema
+  │  #46 · ✓ Checks · ⏳ Awaiting review
+  │
+  ◯  Add core utilities
+  │  #45 · ✓ Checks · ✓ Approved · Ready to merge
+  │
+  ◯  main
+
+  Summary: 3 commits · 3 PRs · 2 ready to merge
+```
+
+ztk gives you:
+
+- **Visual stack representation** — See your entire PR stack at a glance with tree visualization
+- **One command sync** — Push all changes and create/update PRs with `ztk update`
+- **Human-first design** — Clear status indicators with colors and Unicode icons
+- **Smart workflows** — Commands like `modify` and `absorb` make editing commits in the middle of your stack easy
+- **Stateless operation** — No local database; reads Git + GitHub state each run
+
+## Quick Example
+
+```bash
+# Create a feature branch with multiple commits
+git checkout -b feature/auth-system
+echo "schema" > db.sql && git add . && git commit -m "Add user database schema"
+echo "middleware" > auth.go && git add . && git commit -m "Add authentication middleware"
+
+# Initialize ztk and sync to GitHub
+ztk init
+ztk update
+```
+
+This creates two stacked PRs:
+- **PR #1:** "Add user database schema" (base: main)
+- **PR #2:** "Add authentication middleware" (base: PR #1)
+
+## Next Steps
+
+<Cards>
+  <Card title="Installation" href="/docs/installation" description="Build ztk and set up GitHub authentication" />
+  <Card title="Quick Start" href="/docs/quickstart" description="Create your first stacked PR workflow" />
+  <Card title="Commands" href="/docs/commands" description="Full command reference" />
+</Cards>

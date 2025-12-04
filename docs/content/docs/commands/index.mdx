@@ -1,0 +1,31 @@
+---
+title: Commands
+description: ztk command reference
+---
+
+# Commands
+
+ztk provides a focused set of commands for managing stacked PRs.
+
+## Command Overview
+
+| Command | Aliases | Description |
+|---------|---------|-------------|
+| `init` | — | Initialize ztk in the current repository |
+| `status` | `s`, `st` | Show status of the current stack |
+| `update` | `u`, `up` | Create/update PRs for commits in the stack |
+| `sync` | — | Fetch, rebase on main, and clean merged branches |
+| `modify` | `m` | Amend a commit in the middle of the stack |
+| `absorb` | `a`, `ab` | Auto-amend staged changes into relevant commits |
+| `help` | `--help`, `-h` | Show help message |
+
+## Detailed Reference
+
+<Cards>
+  <Card title="init" href="/docs/commands/init" description="Initialize ztk configuration" />
+  <Card title="status" href="/docs/commands/status" description="View your stack and PR status" />
+  <Card title="update" href="/docs/commands/update" description="Sync your stack to GitHub" />
+  <Card title="sync" href="/docs/commands/sync" description="Rebase on main and clean up" />
+  <Card title="modify" href="/docs/commands/modify" description="Amend commits in the stack" />
+  <Card title="absorb" href="/docs/commands/absorb" description="Auto-route changes to commits" />
+</Cards>

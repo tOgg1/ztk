@@ -1,0 +1,104 @@
+---
+title: absorb
+description: Auto-amend staged changes into relevant commits
+---
+
+# ztk absorb
+
+Automatically route staged changes to the commits that originally introduced the modified lines.
+
+## Usage
+
+```bash
+ztk absorb
+ztk a       # alias
+ztk ab      # alias
+```
+
+## Prerequisites
+
+You must have **staged changes** before running absorb:
+
+```bash
+git add <files>
+ztk absorb
+```
+
+## Description
+
+The `absorb` command is like a smart `modify` — it uses `git blame` to figure out **which commit introduced each line you're changing**, then automatically creates fixup commits for the right targets.
+
+This is incredibly useful when addressing code review feedback that touches multiple commits.
+
+## How It Works
+
+1. Parses your staged diff into hunks
+2. For each hunk, runs `git blame` on the original lines
+3. If all lines in a hunk came from a single commit in your stack, that's the target
+4. Creates fixup commits and rebases to squash them
+
+## Output Example
+
+```
+  Absorb plan:
+
+  ◯ Add database layer
+  │  2 hunks from: src/db.go, src/models.go
+
+  ◯ Add core utilities
+  │  1 hunk from: src/utils.go
+
+  ⚠ 1 hunk cannot be absorbed (new lines or mixed origins)
+
+  Absorb 3 hunks into 2 commits? [y/N]: y
+
+  ✓ Created fixup for: Add database layer
+  ✓ Created fixup for: Add core utilities
+
+  Rebasing to squash fixups... done
+
+  ✓ Absorbed 3 hunks into 2 commits
+
+  Run ztk update to sync changes to GitHub.
+```
+
+## Unabsorbable Hunks
+
+Some changes can't be automatically absorbed:
+
+- **New lines** — Lines that don't modify existing code (no blame target)
+- **Mixed origins** — A hunk modifies lines from multiple commits
+- **Lines from outside your stack** — The original lines came from before your stack
+
+When this happens, use `ztk modify` to manually select a target commit.
+
+## Example Workflow
+
+```bash
+# Reviewer left feedback on multiple files/commits
+vim src/db.go       # Fix in commit 2
+vim src/utils.go    # Fix in commit 1
+vim src/api.go      # Fix in commit 3
+
+# Stage all fixes
+git add -A
+
+# Let absorb figure out where each fix belongs
+ztk absorb
+
+# Push updated stack
+ztk update
+```
+
+## Comparison with modify
+
+| | `absorb` | `modify` |
+|---|----------|----------|
+| **Routing** | Automatic (uses blame) | Manual selection |
+| **Best for** | Multiple scattered fixes | Single targeted change |
+| **New code** | Can't absorb | Works fine |
+
+## See Also
+
+- [modify](/docs/commands/modify) — Manual commit selection
+- [update](/docs/commands/update) — Sync after absorbing

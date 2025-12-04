@@ -1,0 +1,89 @@
+---
+title: status
+description: Show the current stack status
+---
+
+# ztk status
+
+Display the status of your current commit stack and associated PRs.
+
+## Usage
+
+```bash
+ztk status
+ztk s       # alias
+ztk st      # alias
+```
+
+## Description
+
+The `status` command shows a visual representation of your commit stack, including:
+
+- All commits ahead of main branch
+- Associated PR numbers and links
+- CI check status (passing, failing, pending)
+- Review status (approved, changes requested, awaiting review)
+- Merge conflicts detection
+- WIP commit indicators
+
+## Output Example
+
+```
+  Stack: feature/auth  (3 commits ahead of main)
+
+  ◉  Add authentication middleware           ← you are here
+  │  #47 · ✓ Checks · ✓ Approved
+  │
+  ◯  Add user database schema
+  │  #46 · ✓ Checks · ⏳ Awaiting review
+  │
+  ◯  Add core utilities
+  │  #45 · ✓ Checks · ✓ Approved
+  │
+  ◯  main
+
+  Summary: 3 commits · 3 PRs · 2 ready to merge
+```
+
+## Status Icons
+
+| Icon | Meaning |
+|------|---------|
+| `◉` | Current commit (HEAD) |
+| `◯` | Other commits in stack |
+| `✓` | Checks passed / Approved |
+| `✗` | Checks failed / Changes requested |
+| `⏳` | Checks pending / Awaiting review |
+| `⚠` | Conflicts detected |
+
+## Colors
+
+- **Green** — Success, ready, approved
+- **Yellow** — Pending, WIP commits
+- **Red** — Failed, conflicts
+- **Blue** — PR numbers and links
+- **Dim** — Secondary information
+
+## Without GitHub Token
+
+If no GitHub token is available, status will show commits without PR information:
+
+```
+(No GitHub token - PR status unavailable)
+
+  Stack: feature/auth  (2 commits ahead of main)
+
+  ◉  Add authentication middleware           ← you are here
+  │  No PR
+  │
+  ◯  Add core utilities
+  │  No PR
+  │
+  ◯  main
+
+  Summary: 2 commits
+```
+
+## See Also
+
+- [update](/docs/commands/update) — Create/update PRs after viewing status

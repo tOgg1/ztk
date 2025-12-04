@@ -1,0 +1,89 @@
+---
+title: Installation
+description: How to install ztk
+---
+
+# Installation
+
+## Prerequisites
+
+- **Git** installed and configured
+- **Zig** compiler (0.13.0 or later) for building from source
+- A **GitHub account** with a personal access token
+
+## Building from Source
+
+ztk is written in Zig. Clone the repository and build:
+
+```bash
+git clone https://github.com/tOgg1/ztk.git
+cd ztk
+zig build -Doptimize=ReleaseSafe
+```
+
+The binary will be available at `zig-out/bin/ztk`.
+
+## Add to PATH
+
+Move the binary to a directory in your PATH:
+
+```bash
+# Option 1: User-local bin
+cp zig-out/bin/ztk ~/.local/bin/
+
+# Option 2: System-wide
+sudo cp zig-out/bin/ztk /usr/local/bin/
+```
+
+## GitHub Authentication
+
+ztk needs to authenticate with GitHub to create and update PRs. You have two options:
+
+### Option 1: GitHub CLI (Recommended)
+
+If you have the [GitHub CLI](https://cli.github.com/) installed and authenticated, ztk will automatically use it:
+
+```bash
+gh auth login
+```
+
+### Option 2: Personal Access Token
+
+Create a GitHub personal access token with `repo` scope:
+
+1. Go to [GitHub Settings → Developer settings → Personal access tokens](https://github.com/settings/tokens)
+2. Click "Generate new token (classic)"
+3. Select the `repo` scope
+4. Copy the token
+
+Set it as an environment variable:
+
+```bash
+export GITHUB_TOKEN=ghp_your_token_here
+```
+
+Add this to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) to persist it.
+
+## Verify Installation
+
+```bash
+ztk help
+```
+
+You should see:
+
+```
+ztk - Stacked Pull Requests on GitHub
+
+USAGE:
+    ztk <command> [options]
+
+COMMANDS:
+    init              Initialize ztk in the current repository
+    status, s, st     Show status of the current stack
+    update, u, up     Create/update pull requests for commits in the stack
+    sync              Fetch, rebase on main, and clean merged branches
+    modify, m         Amend a commit in the middle of the stack
+    absorb, a, ab     Auto-amend staged changes into relevant commits
+    help, --help, -h  Show this help message
+```

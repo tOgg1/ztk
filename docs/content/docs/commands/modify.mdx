@@ -1,0 +1,89 @@
+---
+title: modify
+description: Amend a commit in the middle of the stack
+---
+
+# ztk modify
+
+Interactively select and amend a commit in your stack.
+
+## Usage
+
+```bash
+ztk modify
+ztk m       # alias
+```
+
+## Prerequisites
+
+You must have **staged changes** before running modify:
+
+```bash
+git add <files>
+ztk modify
+```
+
+## Description
+
+The `modify` command lets you amend any commit in your stack, not just the most recent one. It:
+
+1. Shows a numbered list of commits in your stack
+2. Prompts you to select which commit to modify
+3. Creates a fixup commit for the selected commit
+4. Automatically rebases to squash the fixup
+
+## Output Example
+
+```
+  Select a commit to modify:
+
+    [1] ◉ Add API endpoints
+    [2] ◯ Add database layer
+    [3] ◯ Add core utilities
+
+  Commit to modify (1-3): 2
+
+  Modifying: Add database layer
+  ✓ Commit modified and stack rebased
+
+  Run ztk update to sync changes to GitHub.
+```
+
+## How It Works
+
+Under the hood, `modify` uses Git's fixup workflow:
+
+1. `git commit --fixup=<sha>` — Creates a fixup commit
+2. `git rebase -i --autosquash origin/main` — Squashes the fixup into the target
+
+This is safer than interactive rebase because it handles the reordering automatically.
+
+## Example Workflow
+
+```bash
+# You notice a typo in an earlier commit
+vim src/db.go
+
+# Stage the fix
+git add src/db.go
+
+# Modify the commit that introduced the typo
+ztk modify
+# Select commit [2] "Add database layer"
+
+# Push the updated stack
+ztk update
+```
+
+## Errors
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| "No staged changes" | Nothing to amend | Run `git add` first |
+| "No commits to modify" | No commits ahead of main | Make some commits first |
+| "Rebase failed" | Conflicts during rebase | Resolve conflicts, then `git rebase --continue` |
+
+## See Also
+
+- [absorb](/docs/commands/absorb) — Automatically route changes to the right commit
+- [update](/docs/commands/update) — Sync after modifying

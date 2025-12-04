@@ -1,0 +1,190 @@
+---
+title: Concepts
+description: Understanding stacked PRs and the ztk workflow
+---
+
+# Concepts
+
+## What Are Stacked PRs?
+
+**Stacked PRs** are a workflow where a large feature is broken into a series of small, dependent pull requests. Each PR builds on the previous one, forming a "stack."
+
+```
+main
+ └── PR #1: Add database schema
+      └── PR #2: Add data access layer
+           └── PR #3: Add API endpoints
+                └── PR #4: Add frontend UI
+```
+
+### Traditional vs Stacked Workflow
+
+| Traditional | Stacked |
+|-------------|---------|
+| One large PR with 1000+ lines | Multiple small PRs with ~200 lines each |
+| Reviewer overwhelmed | Each PR is focused and reviewable |
+| Long review cycles | Parallel review possible |
+| Risky to merge | Easy to verify each piece |
+| Merge conflicts accumulate | Conflicts caught early |
+
+## How ztk Manages Stacks
+
+### Commits = PRs
+
+In ztk, **each commit in your local branch becomes a PR**. Your local Git history is the source of truth:
+
+```bash
+# Your local branch
+git log --oneline main..HEAD
+abc123 Add API endpoints      # → PR #3
+def456 Add data layer         # → PR #2  
+ghi789 Add database schema    # → PR #1
+```
+
+### Branch Naming
+
+ztk creates remote branches for each commit using the pattern:
+
+```
+ztk/{local-branch}/{ztk-id}
+```
+
+For example:
+- `ztk/feature-auth/a1b2c3d4`
+- `ztk/feature-auth/e5f6g7h8`
+
+### ztk-id Tracking
+
+When you first run `ztk update`, ztk adds a unique ID to each commit message:
+
+```
+Add database schema
+
+Implements the user and session tables.
+
+ztk-id: a1b2c3d4
+```
+
+This ID ensures the PR stays linked to the correct commit **even after rebasing**. Without it, rebasing would create new commit SHAs and break the PR association.
+
+## The Stack Lifecycle
+
+### 1. Create Commits
+
+Write small, focused commits on a feature branch:
+
+```bash
+git checkout -b feature/auth
+# ... work ...
+git commit -m "Add user model"
+# ... work ...
+git commit -m "Add authentication service"
+```
+
+### 2. Push Stack
+
+Run `ztk update` to create PRs:
+
+```bash
+ztk update
+# Creates PR #1: Add user model (base: main)
+# Creates PR #2: Add authentication service (base: PR #1)
+```
+
+### 3. Iterate
+
+Make changes based on review feedback:
+
+```bash
+# Fix something in the first commit
+git add .
+ztk modify  # Select commit 1
+
+# Or let absorb figure it out
+git add .
+ztk absorb
+```
+
+Then update the PRs:
+
+```bash
+ztk update
+```
+
+### 4. Merge Bottom-Up
+
+PRs should be merged from the bottom of the stack up:
+
+1. Merge PR #1 (base: main)
+2. GitHub automatically updates PR #2's base to main
+3. Merge PR #2
+4. Continue up the stack
+
+### 5. Clean Up
+
+After merging, sync to clean up:
+
+```bash
+ztk sync
+# Deletes merged branches
+# Rebases remaining stack on updated main
+```
+
+## WIP Commits
+
+Commits with `WIP` in the title are excluded from syncing:
+
+```bash
+git commit -m "WIP: Experimenting with caching"
+ztk update  # This commit is skipped
+```
+
+This lets you work on incomplete changes without creating a PR. When ready, amend the commit to remove `WIP`:
+
+```bash
+git commit --amend -m "Add caching layer"
+ztk update  # Now it creates a PR
+```
+
+## Best Practices
+
+### Write Good Commit Messages
+
+Commit messages become PR titles. Write them as you would a PR title:
+
+```
+✗ fix stuff
+✗ wip
+✗ changes
+
+✓ Add user authentication middleware
+✓ Fix race condition in session handler
+✓ Refactor database connection pooling
+```
+
+### Keep Commits Focused
+
+Each commit should represent one logical change. If you're tempted to write "and" in your commit message, consider splitting it:
+
+```
+✗ Add user model and authentication and API endpoints
+
+✓ Add user model
+✓ Add authentication service  
+✓ Add user API endpoints
+```
+
+### Commit Early, Refine Later
+
+Don't wait until code is perfect. Use `ztk modify` and `ztk absorb` to refine commits after the fact.
+
+### Review Your Own Stack First
+
+Before requesting review, check your stack makes sense:
+
+```bash
+ztk status
+git log --oneline main..HEAD
+```
+
+Each commit should be independently understandable and reviewable.

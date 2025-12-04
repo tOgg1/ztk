@@ -1,0 +1,110 @@
+---
+title: update
+description: Sync your stack to GitHub
+---
+
+# ztk update
+
+Create or update pull requests for all commits in your stack.
+
+## Usage
+
+```bash
+ztk update
+ztk u       # alias
+ztk up      # alias
+```
+
+## Description
+
+The `update` command is the core of ztk. It:
+
+1. **Adds ztk-id markers** to commits (first run only) for stable tracking across rebases
+2. **Creates branches** for each commit in the format `ztk/{branch}/{id}`
+3. **Force-pushes** branches to GitHub
+4. **Creates or updates PRs** with proper base refs for stacking
+
+## How Stacking Works
+
+For a stack of 3 commits:
+
+```
+main
+ └── ztk/feature/abc123  ← PR #1 (base: main)
+      └── ztk/feature/def456  ← PR #2 (base: PR #1's branch)
+           └── ztk/feature/ghi789  ← PR #3 (base: PR #2's branch)
+```
+
+When PR #1 is merged, GitHub automatically updates PR #2's base to `main`.
+
+## Output Example
+
+```
+  Adding ztk-id markers to commits...
+    └─ Added ztk-id to: Add core utilities
+    └─ Added ztk-id to: Add API endpoints
+  ✓ ztk-ids added
+
+  Syncing stack to GitHub...
+
+  ◯ Add core utilities
+    └─ Pushing... done
+    └─ Creating PR... done → #45
+
+  ◉ Add API endpoints
+    └─ Pushing... done
+    └─ Creating PR... done → #46
+
+  ✓ Stack synced: 2 PRs created
+```
+
+## WIP Commits
+
+Commits with titles starting with `WIP` or containing `[WIP]` are skipped:
+
+```
+  Syncing stack to GitHub...
+
+  ◯ Add core utilities
+    └─ Pushing... done
+    └─ PR #45 updated
+
+  ◉ WIP: Add API endpoints
+    └─ Skipped (WIP)
+
+  ✓ Stack synced: 1 PR updated, 1 WIP skipped
+```
+
+## ztk-id Markers
+
+On first run, ztk adds a tracking ID to each commit message:
+
+```
+Add core utilities
+
+Some description here.
+
+ztk-id: a1b2c3d4
+```
+
+This ID ensures PRs stay linked to the correct commits even after rebasing.
+
+## Re-running Update
+
+After making changes to your commits, run `ztk update` again to:
+- Update existing PR branches
+- Update PR descriptions if commit messages changed
+- Create new PRs for new commits
+
+## Errors
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| "No GitHub token" | Can't authenticate | Set `GITHUB_TOKEN` or install `gh` CLI |
+| "Not initialized" | No `.ztk.json` | Run `ztk init` first |
+| "No commits to sync" | No commits ahead of main | Make some commits first |
+
+## See Also
+
+- [status](/docs/commands/status) — Check stack before updating
+- [modify](/docs/commands/modify) — Edit commits before updating

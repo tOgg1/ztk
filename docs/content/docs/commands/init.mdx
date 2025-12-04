@@ -1,0 +1,56 @@
+---
+title: init
+description: Initialize ztk in a repository
+---
+
+# ztk init
+
+Initialize ztk in the current Git repository.
+
+## Usage
+
+```bash
+ztk init
+```
+
+## Description
+
+The `init` command creates a `.ztk.json` configuration file in your repository root. It automatically detects:
+
+- **GitHub owner** from your `origin` remote URL
+- **Repository name** from your `origin` remote URL
+- **Main branch** defaults to `main`
+- **Remote** defaults to `origin`
+
+## Example
+
+```bash
+$ cd my-project
+$ ztk init
+✓ Initialized ztk for myuser/my-project
+  Created .ztk.json
+```
+
+## Generated Config
+
+```json
+{
+  "owner": "myuser",
+  "repo": "my-project",
+  "main_branch": "main",
+  "remote": "origin"
+}
+```
+
+## Errors
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| "Not in a git repository" | No `.git` folder found | Run inside a Git repository |
+| "Could not get remote URL" | No `origin` remote | Add a GitHub remote: `git remote add origin <url>` |
+| "Could not parse GitHub remote URL" | Remote isn't a GitHub URL | Ensure origin points to GitHub |
+| "ztk is already initialized" | `.ztk.json` exists | Edit the existing config or delete it to reinitialize |
+
+## See Also
+
+- [Configuration](/docs/configuration) — Edit the generated config

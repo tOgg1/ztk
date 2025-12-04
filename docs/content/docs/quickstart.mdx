@@ -1,0 +1,148 @@
+---
+title: Quick Start
+description: Create your first stacked PR workflow in 5 minutes
+---
+
+# Quick Start
+
+This guide walks you through creating your first stacked PR workflow with ztk.
+
+## 1. Initialize a Repository
+
+Navigate to your Git repository and initialize ztk:
+
+```bash
+cd your-repo
+ztk init
+```
+
+ztk automatically detects your GitHub remote and creates a `.ztk.json` config file:
+
+```json
+{
+  "owner": "your-github-username",
+  "repo": "your-repo-name",
+  "main_branch": "main",
+  "remote": "origin"
+}
+```
+
+<Callout type="info">
+  Commit `.ztk.json` to your repository so teammates can use ztk too.
+</Callout>
+
+## 2. Create a Feature Branch
+
+```bash
+git checkout -b feature/my-feature
+```
+
+## 3. Make Focused Commits
+
+Create small, focused commits. **Each commit will become its own PR:**
+
+```bash
+# First logical change
+echo "core utilities" > utils.go
+git add . && git commit -m "Add core utilities"
+
+# Second change (builds on first)
+echo "database layer" > db.go
+git add . && git commit -m "Add database layer"
+
+# Third change (builds on second)
+echo "api endpoints" > api.go
+git add . && git commit -m "Add API endpoints"
+```
+
+<Callout type="tip">
+  Write commit messages as you would PR titles — they become the PR titles automatically.
+</Callout>
+
+## 4. Check Your Stack
+
+```bash
+ztk status
+```
+
+Output:
+```
+  Stack: feature/my-feature  (3 commits ahead of main)
+
+  ◉  Add API endpoints              ← you are here
+  │  No PR
+  │
+  ◯  Add database layer
+  │  No PR
+  │
+  ◯  Add core utilities
+  │  No PR
+  │
+  ◯  main
+
+  Summary: 3 commits
+```
+
+## 5. Push to GitHub
+
+```bash
+ztk update
+```
+
+ztk will:
+1. Add tracking IDs to commits (first run only)
+2. Create a branch for each commit
+3. Push branches to GitHub
+4. Create PRs with proper stacking
+
+```
+  Adding ztk-id markers to commits...
+    └─ Added ztk-id to: Add core utilities
+    └─ Added ztk-id to: Add database layer
+    └─ Added ztk-id to: Add API endpoints
+  ✓ ztk-ids added
+
+  Syncing stack to GitHub...
+
+  ◯ Add core utilities
+    └─ Pushing... done
+    └─ Creating PR... done → #45
+
+  ◯ Add database layer
+    └─ Pushing... done
+    └─ Creating PR... done → #46
+
+  ◉ Add API endpoints
+    └─ Pushing... done
+    └─ Creating PR... done → #47
+
+  ✓ Stack synced: 3 PRs created
+```
+
+## 6. Check Status with PR Info
+
+Run `ztk status` again to see PR status:
+
+```
+  Stack: feature/my-feature  (3 commits ahead of main)
+
+  ◉  Add API endpoints              ← you are here
+  │  #47 · ✓ Checks · ⏳ Awaiting review
+  │
+  ◯  Add database layer
+  │  #46 · ✓ Checks · ⏳ Awaiting review
+  │
+  ◯  Add core utilities
+  │  #45 · ✓ Checks · ✓ Approved · Ready to merge
+  │
+  ◯  main
+
+  Summary: 3 commits · 3 PRs · 1 ready to merge
+```
+
+## What's Next?
+
+- **Make changes?** Use `ztk modify` to amend any commit in the stack
+- **Auto-fix changes?** Use `ztk absorb` to automatically route staged changes to the right commits
+- **Sync with main?** Use `ztk sync` to rebase and clean up merged branches
+- **Update PRs?** Just run `ztk update` again after making changes
