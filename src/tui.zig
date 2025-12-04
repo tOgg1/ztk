@@ -24,7 +24,7 @@ pub const Terminal = struct {
     in_raw_mode: bool,
 
     pub fn init() !Terminal {
-        const tty = std.io.getStdIn();
+        const tty = std.fs.File.stdin();
 
         // Get terminal size
         var size = std.posix.system.winsize{
@@ -107,9 +107,6 @@ pub const Terminal = struct {
             3 => .ctrl_c, // Ctrl+C
             4 => .ctrl_d, // Ctrl+D
             127, 8 => .backspace, // Backspace / Ctrl+H
-            'j' => .down,
-            'k' => .up,
-            'q' => .escape,
             else => .{ .char = buf[0] },
         };
     }
@@ -343,19 +340,24 @@ pub fn runInteractive(allocator: std.mem.Allocator, items: []const ListItem) !st
 
         const key = try term.readKey();
         switch (key) {
-            .up, .char => |c| {
-                if (key == .up or c == 'k') {
-                    list.moveUp();
-                } else if (c == 'c' or c == 'y') {
-                    return .{ .action = .copy_llm, .selected = list.selected };
-                } else if (c == 'C') {
-                    return .{ .action = .copy_raw, .selected = list.selected };
-                }
-            },
+            .up => list.moveUp(),
             .down => list.moveDown(),
             .enter => list.toggleExpanded(),
             .escape, .ctrl_c, .ctrl_d => {
                 return .{ .action = .quit, .selected = list.selected };
+            },
+            .char => |c| {
+                if (c == 'k') {
+                    list.moveUp();
+                } else if (c == 'j') {
+                    list.moveDown();
+                } else if (c == 'c' or c == 'y') {
+                    return .{ .action = .copy_llm, .selected = list.selected };
+                } else if (c == 'C') {
+                    return .{ .action = .copy_raw, .selected = list.selected };
+                } else if (c == 'q') {
+                    return .{ .action = .quit, .selected = list.selected };
+                }
             },
             else => {},
         }

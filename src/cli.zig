@@ -5,6 +5,9 @@ const git = @import("git.zig");
 const stack = @import("stack.zig");
 const github = @import("github.zig");
 const review = @import("review.zig");
+const tui = @import("tui.zig");
+const clipboard = @import("clipboard.zig");
+const prompt = @import("prompt.zig");
 
 pub const Command = enum {
     init,
@@ -180,9 +183,16 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
     ui.print("ztk update: not implemented\n", .{});
 }
 
+/// Feedback item for unified handling of reviews and comments
+const FeedbackItem = union(enum) {
+    review_item: *const review.Review,
+    comment_item: *const review.ReviewComment,
+};
+
 fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
-    // Parse --pr flag if provided
+    // Parse flags
     var pr_number: ?u32 = null;
+    var list_mode = false;
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--pr")) {
@@ -196,6 +206,8 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
                 ui.printError("--pr requires a number\n", .{});
                 return;
             }
+        } else if (std.mem.eql(u8, args[i], "--list") or std.mem.eql(u8, args[i], "-l")) {
+            list_mode = true;
         }
     }
 
@@ -267,6 +279,17 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
         s.deinit(allocator);
     }
 
+    // List mode: print and exit
+    if (list_mode) {
+        printReviewList(&summary);
+        return;
+    }
+
+    // TUI mode: build list items and run interactive UI
+    runReviewTUI(allocator, &summary);
+}
+
+fn printReviewList(summary: *const review.PRReviewSummary) void {
     // Display PR info
     ui.print("  {s}PR #{d}:{s} {s}\n", .{ ui.Style.bold, summary.pr_number, ui.Style.reset, summary.pr_title });
     ui.print("  {s}Branch:{s} {s}\n", .{ ui.Style.dim, ui.Style.reset, summary.branch });
@@ -285,7 +308,6 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
             };
             ui.print("    {s} {s} ({s})\n", .{ state_icon, r.author, r.state.toString() });
             if (r.body) |body| {
-                // Print first line of review body
                 var lines = std.mem.splitScalar(u8, body, '\n');
                 if (lines.next()) |first_line| {
                     const preview = if (first_line.len > 60) first_line[0..60] else first_line;
@@ -314,9 +336,7 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
                 ui.Style.reset,
             });
 
-            // Print comment preview (first 80 chars)
             const preview = if (c.body.len > 80) c.body[0..80] else c.body;
-            // Replace newlines with spaces for preview
             var preview_buf: [100]u8 = undefined;
             var j: usize = 0;
             for (preview) |ch| {
@@ -336,6 +356,148 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
     ui.print("  {s}Total feedback items: {d}{s}\n\n", .{ ui.Style.dim, summary.feedbackCount(), ui.Style.reset });
 }
 
+fn runReviewTUI(allocator: std.mem.Allocator, summary: *const review.PRReviewSummary) void {
+    // Build list items from reviews and comments
+    const total_items = summary.reviews.len + summary.comments.len;
+    if (total_items == 0) {
+        ui.print("  {s}No feedback items to display.{s}\n\n", .{ ui.Style.dim, ui.Style.reset });
+        return;
+    }
+
+    var list_items = allocator.alloc(tui.ListItem, total_items) catch {
+        ui.printError("Out of memory\n", .{});
+        return;
+    };
+    defer allocator.free(list_items);
+
+    var feedback_refs = allocator.alloc(FeedbackItem, total_items) catch {
+        ui.printError("Out of memory\n", .{});
+        return;
+    };
+    defer allocator.free(feedback_refs);
+
+    var idx: usize = 0;
+
+    // Add reviews with bodies
+    for (summary.reviews) |*r| {
+        if (r.body == null and r.state == .pending) continue;
+
+        const state_str = switch (r.state) {
+            .approved => "[APPROVED]",
+            .changes_requested => "[CHANGES REQUESTED]",
+            .commented => "[COMMENTED]",
+            .dismissed => "[DISMISSED]",
+            .pending => "[PENDING]",
+        };
+
+        // Format primary line
+        var primary_buf: [256]u8 = undefined;
+        const primary = std.fmt.bufPrint(&primary_buf, "{s} {s}", .{ state_str, r.author }) catch "Review";
+
+        // Store a copy for the list
+        const primary_copy = allocator.dupe(u8, primary) catch continue;
+        const secondary_copy: ?[]const u8 = if (r.body) |b| (allocator.dupe(u8, b) catch null) else null;
+
+        feedback_refs[idx] = .{ .review_item = r };
+        list_items[idx] = .{
+            .primary = primary_copy,
+            .secondary = secondary_copy,
+            .detail = r.body,
+            .context = @ptrCast(@constCast(&feedback_refs[idx])),
+        };
+        idx += 1;
+    }
+
+    // Add inline comments
+    for (summary.comments) |*c| {
+        const path_display = c.path orelse "(general)";
+
+        // Format primary line
+        var primary_buf: [256]u8 = undefined;
+        const primary = if (c.line) |line|
+            std.fmt.bufPrint(&primary_buf, "{s}:{d} - @{s}", .{ path_display, line, c.author }) catch "Comment"
+        else
+            std.fmt.bufPrint(&primary_buf, "{s} - @{s}", .{ path_display, c.author }) catch "Comment";
+
+        const primary_copy = allocator.dupe(u8, primary) catch continue;
+
+        // Create preview for secondary
+        const preview_len = @min(c.body.len, 60);
+        var preview_buf: [80]u8 = undefined;
+        var j: usize = 0;
+        for (c.body[0..preview_len]) |ch| {
+            if (j >= preview_buf.len - 1) break;
+            preview_buf[j] = if (ch == '\n' or ch == '\r') ' ' else ch;
+            j += 1;
+        }
+        const secondary_copy = allocator.dupe(u8, preview_buf[0..j]) catch null;
+
+        feedback_refs[idx] = .{ .comment_item = c };
+        list_items[idx] = .{
+            .primary = primary_copy,
+            .secondary = secondary_copy,
+            .detail = c.body,
+            .context = @ptrCast(@constCast(&feedback_refs[idx])),
+        };
+        idx += 1;
+    }
+
+    // Trim to actual count
+    const items_slice = list_items[0..idx];
+
+    // Run the TUI
+    const result = tui.runInteractive(allocator, items_slice) catch |err| {
+        ui.printError("TUI error: {any}\n", .{err});
+        return;
+    };
+
+    // Handle action
+    switch (result.action) {
+        .quit => {
+            ui.print("\n", .{});
+        },
+        .copy_raw, .copy_llm => {
+            if (result.selected < idx) {
+                const item = &feedback_refs[result.selected];
+                const ctx = prompt.PromptContext{
+                    .pr_title = summary.pr_title,
+                    .pr_number = summary.pr_number,
+                    .branch = summary.branch,
+                };
+
+                if (result.action == .copy_llm) {
+                    // Copy with LLM instructions
+                    const formatted = switch (item.*) {
+                        .comment_item => |c| prompt.formatCommentFull(allocator, c.*, ctx) catch {
+                            ui.printError("Failed to format comment\n", .{});
+                            return;
+                        },
+                        .review_item => |r| prompt.formatReview(allocator, r.*, ctx) catch {
+                            ui.printError("Failed to format review\n", .{});
+                            return;
+                        },
+                    };
+                    defer allocator.free(formatted);
+                    clipboard.copyWithFeedback(allocator, formatted);
+                } else {
+                    // Copy raw text only
+                    const raw_text = switch (item.*) {
+                        .comment_item => |c| c.body,
+                        .review_item => |r| r.body orelse "",
+                    };
+                    clipboard.copyWithFeedback(allocator, raw_text);
+                }
+            }
+        },
+    }
+
+    // Clean up allocated strings
+    for (items_slice) |item| {
+        allocator.free(item.primary);
+        if (item.secondary) |s| allocator.free(s);
+    }
+}
+
 fn printUsage() void {
     const usage =
         \\ztk - Stacked Pull Requests on GitHub
@@ -352,8 +514,7 @@ fn printUsage() void {
         \\
         \\REVIEW OPTIONS:
         \\    --pr <number>     Show reviews for specific PR number
-        \\    --current         Show reviews for current branch's PR only
-        \\    --stack           Show reviews for all PRs in stack (default)
+        \\    --list, -l        Show reviews as text list (non-interactive)
         \\
         \\EXAMPLES:
         \\    ztk init          # Initialize ztk config

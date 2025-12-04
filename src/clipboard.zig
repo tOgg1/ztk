@@ -22,9 +22,9 @@ pub fn copy(allocator: std.mem.Allocator, text: []const u8) ClipboardError!void 
 
 fn copyViaPbcopy(allocator: std.mem.Allocator, text: []const u8) ClipboardError!void {
     var child = std.process.Child.init(&.{"pbcopy"}, allocator);
-    child.stdin_behavior = .pipe;
-    child.stdout_behavior = .ignore;
-    child.stderr_behavior = .ignore;
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
 
     child.spawn() catch return ClipboardError.CommandFailed;
 
@@ -61,9 +61,9 @@ fn copyViaLinux(allocator: std.mem.Allocator, text: []const u8) ClipboardError!v
 
 fn copyViaCommand(allocator: std.mem.Allocator, argv: []const []const u8, text: []const u8) ClipboardError!void {
     var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .pipe;
-    child.stdout_behavior = .ignore;
-    child.stderr_behavior = .ignore;
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
 
     child.spawn() catch return ClipboardError.CommandFailed;
 
