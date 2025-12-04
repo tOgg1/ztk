@@ -158,9 +158,9 @@ fn cmdStatus(allocator: std.mem.Allocator) void {
         return;
     };
     defer {
-        for (specs) |spec| {
-            allocator.free(spec.branch_name);
-            allocator.free(spec.base_ref);
+        for (specs) |*spec| {
+            var s = spec.*;
+            s.deinit(allocator);
         }
         allocator.free(specs);
     }
@@ -523,9 +523,9 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
         return;
     };
     defer {
-        for (specs) |spec| {
-            allocator.free(spec.branch_name);
-            allocator.free(spec.base_ref);
+        for (specs) |*spec| {
+            var s = spec.*;
+            s.deinit(allocator);
         }
         allocator.free(specs);
     }
