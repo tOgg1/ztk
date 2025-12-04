@@ -53,8 +53,8 @@ pub fn handleCommand(allocator: std.mem.Allocator, args: []const [:0]const u8) !
             .status => cmdStatus(allocator),
             .update => cmdUpdate(allocator),
             .sync => cmdSync(allocator),
-            .modify => cmdModify(allocator),
-            .absorb => cmdAbsorb(allocator),
+            .modify => cmdModify(allocator, args),
+            .absorb => cmdAbsorb(allocator, args),
             .merge => cmdMerge(allocator, args),
             .help => printUsage(),
         }
@@ -726,7 +726,14 @@ fn cmdSync(allocator: std.mem.Allocator) void {
     ui.print("\n\n", .{});
 }
 
-fn cmdModify(allocator: std.mem.Allocator) void {
+fn cmdModify(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
+    var auto_update = false;
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--update")) {
+            auto_update = true;
+        }
+    }
+
     const cfg = config.load(allocator) catch |err| {
         switch (err) {
             config.ConfigError.ConfigNotFound => {
@@ -864,7 +871,12 @@ fn cmdModify(allocator: std.mem.Allocator) void {
     };
 
     ui.print("  {s}{s}{s} Commit modified and stack rebased\n\n", .{ ui.Style.green, ui.Style.check, ui.Style.reset });
-    ui.print("  Run {s}ztk update{s} to sync changes to GitHub.\n\n", .{ ui.Style.bold, ui.Style.reset });
+
+    if (auto_update) {
+        cmdUpdate(allocator);
+    } else {
+        ui.print("  Run {s}ztk update{s} to sync changes to GitHub.\n\n", .{ ui.Style.bold, ui.Style.reset });
+    }
 }
 
 const AbsorbTarget = struct {
@@ -879,7 +891,14 @@ const AbsorbTarget = struct {
     }
 };
 
-fn cmdAbsorb(allocator: std.mem.Allocator) void {
+fn cmdAbsorb(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
+    var auto_update = false;
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--update")) {
+            auto_update = true;
+        }
+    }
+
     const cfg = config.load(allocator) catch |err| {
         switch (err) {
             config.ConfigError.ConfigNotFound => {
@@ -1199,7 +1218,12 @@ fn cmdAbsorb(allocator: std.mem.Allocator) void {
         absorb_map.count(),
         if (absorb_map.count() == 1) "" else "s",
     });
-    ui.print("  Run {s}ztk update{s} to sync changes to GitHub.\n\n", .{ ui.Style.bold, ui.Style.reset });
+
+    if (auto_update) {
+        cmdUpdate(allocator);
+    } else {
+        ui.print("  Run {s}ztk update{s} to sync changes to GitHub.\n\n", .{ ui.Style.bold, ui.Style.reset });
+    }
 }
 
 fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
@@ -1467,6 +1491,9 @@ fn printUsage() void {
         \\    merge, m          Merge all mergeable PRs (top PR targets main, lower PRs closed)
         \\    help, --help, -h  Show this help message
         \\
+        \\MODIFY/ABSORB OPTIONS:
+        \\    -u, --update      Run 'ztk update' after successful modify/absorb
+        \\
         \\MERGE OPTIONS:
         \\    -r, --rebase      Rebase current branch onto updated main after merge
         \\    -n, --no-review   Merge without requiring an approved review
@@ -1478,7 +1505,9 @@ fn printUsage() void {
         \\    ztk update        # Sync stack to GitHub
         \\    ztk sync          # Rebase on main and clean up
         \\    ztk modify        # Amend a commit in the stack
+        \\    ztk modify -u     # Amend and sync to GitHub
         \\    ztk absorb        # Auto-absorb staged changes
+        \\    ztk absorb -u     # Absorb and sync to GitHub
         \\    ztk merge         # Merge ready PRs
         \\    ztk merge -r      # Merge and rebase local branch
         \\
