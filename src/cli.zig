@@ -12,6 +12,7 @@ pub const Command = enum {
     sync,
     modify,
     absorb,
+    merge,
     help,
 
     pub fn fromString(str: []const u8) ?Command {
@@ -25,10 +26,11 @@ pub const Command = enum {
             .{ "up", .update },
             .{ "sync", .sync },
             .{ "modify", .modify },
-            .{ "m", .modify },
             .{ "absorb", .absorb },
             .{ "a", .absorb },
             .{ "ab", .absorb },
+            .{ "merge", .merge },
+            .{ "m", .merge },
             .{ "help", .help },
             .{ "--help", .help },
             .{ "-h", .help },
@@ -53,6 +55,7 @@ pub fn handleCommand(allocator: std.mem.Allocator, args: []const [:0]const u8) !
             .sync => cmdSync(allocator),
             .modify => cmdModify(allocator),
             .absorb => cmdAbsorb(allocator),
+            .merge => cmdMerge(allocator, args),
             .help => printUsage(),
         }
     } else {
@@ -1176,6 +1179,243 @@ fn cmdAbsorb(allocator: std.mem.Allocator) void {
     ui.print("  Run {s}ztk update{s} to sync changes to GitHub.\n\n", .{ ui.Style.bold, ui.Style.reset });
 }
 
+fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
+    var auto_rebase = false;
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--rebase")) {
+            auto_rebase = true;
+        }
+    }
+
+    const cfg = config.load(allocator) catch |err| {
+        switch (err) {
+            config.ConfigError.ConfigNotFound => {
+                ui.printError("Not initialized. Run 'ztk init' first.\n", .{});
+            },
+            config.ConfigError.NotInGitRepo => {
+                ui.printError("Not in a git repository.\n", .{});
+            },
+            else => {
+                ui.printError("Failed to load config: {any}\n", .{err});
+            },
+        }
+        return;
+    };
+    defer {
+        var c = cfg;
+        c.deinit(allocator);
+    }
+
+    const stk = stack.readStack(allocator, cfg) catch |err| {
+        ui.printError("Failed to read stack: {any}\n", .{err});
+        return;
+    };
+    defer {
+        var s = stk;
+        s.deinit(allocator);
+    }
+
+    if (stk.commits.len == 0) {
+        ui.print("No commits to merge.\n", .{});
+        return;
+    }
+
+    var gh_client = github.Client.init(allocator, cfg) catch |err| {
+        switch (err) {
+            github.GitHubError.NoToken => {
+                ui.printError("GitHub authentication failed.\n", .{});
+                ui.print("  Run 'gh auth login' or set GITHUB_TOKEN.\n", .{});
+            },
+            else => {
+                ui.printError("Failed to initialize GitHub client: {any}\n", .{err});
+            },
+        }
+        return;
+    };
+    defer gh_client.deinit();
+
+    ui.print("\n", .{});
+    ui.print("  {s}Checking PRs for merge...{s}\n", .{ ui.Style.bold, ui.Style.reset });
+    ui.print("\n", .{});
+
+    const MergePRInfo = struct {
+        number: u32,
+        title: []const u8,
+        branch_name: []const u8,
+        is_mergeable: bool,
+    };
+
+    var pr_infos = std.ArrayListUnmanaged(MergePRInfo){};
+    defer {
+        for (pr_infos.items) |info| {
+            allocator.free(info.branch_name);
+        }
+        pr_infos.deinit(allocator);
+    }
+
+    for (stk.commits) |commit| {
+        if (commit.is_wip) continue;
+
+        const id_suffix = if (commit.ztk_id) |id|
+            id[0..@min(8, id.len)]
+        else
+            commit.short_sha;
+
+        var branch_buf: [256]u8 = undefined;
+        const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
+            stk.head_branch,
+            id_suffix,
+        }) catch continue;
+
+        const pr = gh_client.findPR(branch_name) catch continue;
+        if (pr) |found_pr| {
+            defer {
+                var mutable_pr = found_pr;
+                mutable_pr.deinit(allocator);
+            }
+
+            if (std.mem.eql(u8, found_pr.state, "closed")) {
+                continue;
+            }
+
+            const status = gh_client.getPRStatus(found_pr);
+
+            const is_mergeable = status.checks == .success and
+                status.review == .approved and
+                status.mergeable != .conflicting;
+
+            const branch_copy = allocator.dupe(u8, branch_name) catch continue;
+
+            pr_infos.append(allocator, .{
+                .number = found_pr.number,
+                .title = commit.title,
+                .branch_name = branch_copy,
+                .is_mergeable = is_mergeable,
+            }) catch {
+                allocator.free(branch_copy);
+                continue;
+            };
+        }
+    }
+
+    if (pr_infos.items.len == 0) {
+        ui.print("  No PRs found. Run 'ztk update' first.\n", .{});
+        ui.print("\n", .{});
+        return;
+    }
+
+    var mergeable_count: usize = 0;
+    for (pr_infos.items) |info| {
+        const status_icon = if (info.is_mergeable) ui.Style.check else ui.Style.cross;
+        const status_color = if (info.is_mergeable) ui.Style.green else ui.Style.red;
+
+        ui.print("  {s}{s}{s} #{d} {s}\n", .{
+            status_color,
+            status_icon,
+            ui.Style.reset,
+            info.number,
+            info.title,
+        });
+
+        if (info.is_mergeable) {
+            mergeable_count += 1;
+        } else {
+            break;
+        }
+    }
+
+    ui.print("\n", .{});
+
+    if (mergeable_count == 0) {
+        ui.print("  {s}⚠ No PRs ready to merge{s}\n", .{ ui.Style.yellow, ui.Style.reset });
+        ui.print("    PRs need: ✓ CI checks passing, ✓ approved review, ✓ no conflicts\n", .{});
+        ui.print("\n", .{});
+        return;
+    }
+
+    const top_pr = pr_infos.items[mergeable_count - 1];
+
+    ui.print("  {s}Merging {d} commit{s} via PR #{d}...{s}\n", .{
+        ui.Style.bold,
+        mergeable_count,
+        if (mergeable_count == 1) "" else "s",
+        top_pr.number,
+        ui.Style.reset,
+    });
+    ui.print("\n", .{});
+
+    ui.print("  Updating #{d} base to {s}...", .{ top_pr.number, cfg.main_branch });
+    gh_client.updatePR(top_pr.number, null, null, cfg.main_branch) catch {
+        ui.print(" {s}failed{s}\n", .{ ui.Style.red, ui.Style.reset });
+        return;
+    };
+    ui.print(" {s}done{s}\n", .{ ui.Style.green, ui.Style.reset });
+
+    ui.print("  Merging #{d} {s}...", .{ top_pr.number, top_pr.title });
+    gh_client.mergePR(top_pr.number) catch {
+        ui.print(" {s}failed{s}\n", .{ ui.Style.red, ui.Style.reset });
+        return;
+    };
+    ui.print(" {s}done{s}\n", .{ ui.Style.green, ui.Style.reset });
+
+    gh_client.deleteBranch(top_pr.branch_name) catch {};
+
+    if (mergeable_count > 1) {
+        ui.print("\n", .{});
+        ui.print("  Closing {d} merged PR{s}...\n", .{ mergeable_count - 1, if (mergeable_count == 2) "" else "s" });
+
+        for (pr_infos.items[0 .. mergeable_count - 1]) |info| {
+            var comment_buf: [512]u8 = undefined;
+            const comment = std.fmt.bufPrint(&comment_buf, "Commit merged in pull request #{d}", .{top_pr.number}) catch continue;
+
+            gh_client.commentPR(info.number, comment) catch {};
+            gh_client.closePR(info.number) catch {};
+            gh_client.deleteBranch(info.branch_name) catch {};
+
+            ui.print("    Closed #{d} {s}\n", .{ info.number, info.title });
+        }
+    }
+
+    ui.print("\n", .{});
+    ui.print("  {s}{s} Merged {d} commit{s} via #{d}{s}\n", .{
+        ui.Style.green,
+        ui.Style.check,
+        mergeable_count,
+        if (mergeable_count == 1) "" else "s",
+        top_pr.number,
+        ui.Style.reset,
+    });
+
+    ui.print("  Fetching {s}...", .{cfg.remote});
+    const fetch_output = git.run(allocator, &.{ "fetch", cfg.remote });
+    if (fetch_output) |output| {
+        allocator.free(output);
+        ui.print(" {s}done{s}\n", .{ ui.Style.green, ui.Style.reset });
+    } else |_| {
+        ui.print(" {s}failed{s}\n", .{ ui.Style.yellow, ui.Style.reset });
+    }
+
+    if (auto_rebase) {
+        var rebase_target_buf: [256]u8 = undefined;
+        const rebase_target = std.fmt.bufPrint(&rebase_target_buf, "{s}/{s}", .{ cfg.remote, cfg.main_branch }) catch {
+            ui.printError("Failed to format rebase target\n", .{});
+            return;
+        };
+
+        ui.print("  Rebasing onto {s}...", .{rebase_target});
+        const rebase_output = git.run(allocator, &.{ "rebase", rebase_target });
+        if (rebase_output) |output| {
+            allocator.free(output);
+            ui.print(" {s}done{s}\n", .{ ui.Style.green, ui.Style.reset });
+        } else |_| {
+            ui.print(" {s}failed{s}\n", .{ ui.Style.red, ui.Style.reset });
+            ui.printError("Rebase failed. Resolve conflicts and run 'git rebase --continue'\n", .{});
+        }
+    }
+
+    ui.print("\n", .{});
+}
+
 fn printUsage() void {
     const usage =
         \\ztk - Stacked Pull Requests on GitHub
@@ -1188,9 +1428,13 @@ fn printUsage() void {
         \\    status, s, st     Show status of the current stack
         \\    update, u, up     Create/update pull requests for commits in the stack
         \\    sync              Fetch, rebase on main, and clean merged branches
-        \\    modify, m         Amend a commit in the middle of the stack
+        \\    modify            Amend a commit in the middle of the stack
         \\    absorb, a, ab     Auto-amend staged changes into relevant commits
+        \\    merge, m          Merge all mergeable PRs (top PR targets main, lower PRs closed)
         \\    help, --help, -h  Show this help message
+        \\
+        \\MERGE OPTIONS:
+        \\    -r, --rebase      Rebase current branch onto updated main after merge
         \\
         \\EXAMPLES:
         \\    ztk init          # Initialize ztk config
@@ -1199,6 +1443,8 @@ fn printUsage() void {
         \\    ztk sync          # Rebase on main and clean up
         \\    ztk modify        # Amend a commit in the stack
         \\    ztk absorb        # Auto-absorb staged changes
+        \\    ztk merge         # Merge ready PRs
+        \\    ztk merge -r      # Merge and rebase local branch
         \\
     ;
     ui.print("{s}", .{usage});

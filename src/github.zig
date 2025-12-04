@@ -499,6 +499,59 @@ pub const Client = struct {
         };
     }
 
+    pub fn mergePR(self: *Client, pr_number: u32) !void {
+        var path_buf: [256]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/repos/{s}/{s}/pulls/{d}/merge", .{
+            self.owner,
+            self.repo,
+            pr_number,
+        }) catch return error.OutOfMemory;
+
+        const body = "{\"merge_method\":\"rebase\"}";
+        const response = try self.request("PUT", path, body);
+        defer self.allocator.free(response);
+    }
+
+    pub fn closePR(self: *Client, pr_number: u32) !void {
+        var path_buf: [256]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/repos/{s}/{s}/pulls/{d}", .{
+            self.owner,
+            self.repo,
+            pr_number,
+        }) catch return error.OutOfMemory;
+
+        const body = "{\"state\":\"closed\"}";
+        const response = try self.request("PATCH", path, body);
+        defer self.allocator.free(response);
+    }
+
+    pub fn commentPR(self: *Client, pr_number: u32, comment: []const u8) !void {
+        var path_buf: [256]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/repos/{s}/{s}/issues/{d}/comments", .{
+            self.owner,
+            self.repo,
+            pr_number,
+        }) catch return error.OutOfMemory;
+
+        var body_buf: [1024]u8 = undefined;
+        const body = std.fmt.bufPrint(&body_buf, "{{\"body\":\"{s}\"}}", .{comment}) catch return error.OutOfMemory;
+
+        const response = try self.request("POST", path, body);
+        defer self.allocator.free(response);
+    }
+
+    pub fn deleteBranch(self: *Client, branch_name: []const u8) !void {
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/repos/{s}/{s}/git/refs/heads/{s}", .{
+            self.owner,
+            self.repo,
+            branch_name,
+        }) catch return error.OutOfMemory;
+
+        const response = try self.request("DELETE", path, null);
+        defer self.allocator.free(response);
+    }
+
     fn request(self: *Client, method: []const u8, path: []const u8, body: ?[]const u8) ![]u8 {
         var url_buf: [1024]u8 = undefined;
         const url = std.fmt.bufPrint(&url_buf, "https://api.github.com{s}", .{path}) catch return error.OutOfMemory;
