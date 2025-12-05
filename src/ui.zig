@@ -16,6 +16,7 @@ pub const Style = struct {
     pub const pending = "⏳";
     pub const warning = "⚠";
     pub const arrow = "←";
+    pub const arrow_right = "→";
     pub const pipe = "│";
 };
 
