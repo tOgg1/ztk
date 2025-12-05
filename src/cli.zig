@@ -1247,6 +1247,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
     var auto_rebase = false;
     var skip_review = false;
     var force = false;
+    var interactive = false;
     for (args[2..]) |arg| {
         if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--rebase")) {
             auto_rebase = true;
@@ -1256,6 +1257,9 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
         }
         if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
             force = true;
+        }
+        if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--interactive")) {
+            interactive = true;
         }
     }
 
@@ -1408,12 +1412,54 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
         return;
     }
 
-    const top_pr = pr_infos.items[mergeable_count - 1];
+    // Interactive mode: let user select up to which PR to merge
+    var selected_count = mergeable_count;
+    if (interactive and mergeable_count > 1) {
+        ui.print("  Select PR to merge up to (1-{d}), or press Enter for all: ", .{mergeable_count});
+
+        var input_buf: [32]u8 = undefined;
+        var input_len: usize = 0;
+        const stdin_fd = std.posix.STDIN_FILENO;
+        while (input_len < input_buf.len) {
+            const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
+                ui.printError("Failed to read input\n", .{});
+                return;
+            };
+            if (bytes_read == 0) break;
+            input_len += bytes_read;
+            if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
+        }
+        const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
+
+        if (input == null) {
+            ui.print("\n  Cancelled.\n\n", .{});
+            return;
+        }
+
+        const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
+        if (trimmed.len > 0) {
+            const selection = std.fmt.parseInt(usize, trimmed, 10) catch {
+                ui.printError("Invalid input. Enter a number.\n", .{});
+                return;
+            };
+
+            if (selection < 1 or selection > mergeable_count) {
+                ui.printError("Invalid selection: {d}. Must be between 1 and {d}.\n", .{ selection, mergeable_count });
+                return;
+            }
+
+            selected_count = selection;
+        }
+
+        ui.print("\n", .{});
+    }
+
+    const top_pr = pr_infos.items[selected_count - 1];
 
     ui.print("  {s}Merging {d} commit{s} via PR #{d}...{s}\n", .{
         ui.Style.bold,
-        mergeable_count,
-        if (mergeable_count == 1) "" else "s",
+        selected_count,
+        if (selected_count == 1) "" else "s",
         top_pr.number,
         ui.Style.reset,
     });
@@ -1435,11 +1481,11 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
 
     gh_client.deleteBranch(top_pr.branch_name) catch {};
 
-    if (mergeable_count > 1) {
+    if (selected_count > 1) {
         ui.print("\n", .{});
-        ui.print("  Closing {d} merged PR{s}...\n", .{ mergeable_count - 1, if (mergeable_count == 2) "" else "s" });
+        ui.print("  Closing {d} merged PR{s}...\n", .{ selected_count - 1, if (selected_count == 2) "" else "s" });
 
-        for (pr_infos.items[0 .. mergeable_count - 1]) |info| {
+        for (pr_infos.items[0 .. selected_count - 1]) |info| {
             var comment_buf: [512]u8 = undefined;
             const comment = std.fmt.bufPrint(&comment_buf, "Commit merged in pull request #{d}", .{top_pr.number}) catch continue;
 
@@ -1455,8 +1501,8 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
     ui.print("  {s}{s} Merged {d} commit{s} via #{d}{s}\n", .{
         ui.Style.green,
         ui.Style.check,
-        mergeable_count,
-        if (mergeable_count == 1) "" else "s",
+        selected_count,
+        if (selected_count == 1) "" else "s",
         top_pr.number,
         ui.Style.reset,
     });
@@ -2008,6 +2054,7 @@ fn printUsage() void {
         \\    -u, --update      Run 'ztk update' after successful modify/absorb
         \\
         \\MERGE OPTIONS:
+        \\    -i, --interactive Interactively select up to which PR to merge
         \\    -r, --rebase      Rebase current branch onto updated main after merge
         \\    -n, --no-review   Merge without requiring an approved review
         \\    -f, --force       Force merge (only blocked by merge conflicts)
@@ -2026,6 +2073,7 @@ fn printUsage() void {
         \\    ztk absorb        # Auto-absorb staged changes
         \\    ztk absorb -u     # Absorb and sync to GitHub
         \\    ztk merge         # Merge ready PRs
+        \\    ztk merge -i      # Interactively select which PRs to merge
         \\    ztk merge -r      # Merge and rebase local branch
         \\    ztk review        # Interactive review feedback TUI
         \\    ztk review --list # Print feedback as list
