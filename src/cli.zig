@@ -28,6 +28,7 @@ pub const Command = enum {
             .{ "s", .status },
             .{ "st", .status },
             .{ "update", .update },
+            .{ "push", .update },
             .{ "u", .update },
             .{ "up", .update },
             .{ "sync", .sync },
@@ -1992,7 +1993,7 @@ fn printUsage() void {
         \\COMMANDS:
         \\    init              Initialize ztk in the current repository
         \\    status, s, st     Show status of the current stack
-        \\    update, u, up     Create/update pull requests for commits in the stack
+        \\    update, push, u   Create/update pull requests for commits in the stack
         \\    sync              Fetch, rebase on main, and clean merged branches
         \\    modify            Amend a commit in the middle of the stack
         \\    absorb, a, ab     Auto-amend staged changes into relevant commits
