@@ -564,11 +564,13 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
         };
         ui.print("    └─ Branch: {s}{s}{s}\n", .{ ui.Style.dim, spec.branch_name, ui.Style.reset });
 
-        git.push(allocator, cfg.remote, spec.branch_name, true) catch |err| {
+        const pushed = git.push(allocator, cfg.remote, spec.branch_name, true) catch |err| {
             ui.print("    └─ {s}Failed to push: {any}{s}\n", .{ ui.Style.red, err, ui.Style.reset });
             continue;
         };
-        ui.print("    └─ Pushed\n", .{});
+        if (pushed) {
+            ui.print("    └─ Pushed\n", .{});
+        }
 
         const existing_pr = gh_client.findPR(spec.branch_name) catch null;
         if (existing_pr) |pr| {
