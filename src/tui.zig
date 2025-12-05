@@ -95,6 +95,48 @@ pub const Terminal = struct {
         self.in_raw_mode = false;
     }
 
+    /// Enter raw mode without clearing screen (for inline TUI components)
+    /// Unlike enterRawMode, this keeps OPOST enabled so \n is translated to \r\n
+    pub fn enterRawModeInline(self: *Terminal) !void {
+        var raw = self.original_termios;
+
+        // Disable echo, canonical mode, signals, extended input processing
+        raw.lflag.ECHO = false;
+        raw.lflag.ICANON = false;
+        raw.lflag.ISIG = false;
+        raw.lflag.IEXTEN = false;
+
+        // Disable software flow control, CR-to-NL on input
+        raw.iflag.IXON = false;
+        raw.iflag.ICRNL = false;
+        raw.iflag.BRKINT = false;
+        raw.iflag.INPCK = false;
+        raw.iflag.ISTRIP = false;
+
+        // Keep OPOST enabled for inline mode - allows \n to work normally
+        // (unlike full raw mode which disables it for precise cursor control)
+
+        // Set character size to 8 bits
+        raw.cflag.CSIZE = .CS8;
+
+        // Minimum bytes for read, timeout
+        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+
+        try std.posix.tcsetattr(self.tty.handle, .FLUSH, raw);
+        self.in_raw_mode = true;
+
+        // Hide cursor but don't clear screen
+        self.hideCursor();
+    }
+
+    /// Exit raw mode for inline components (shows cursor, restores settings)
+    pub fn exitRawModeInline(self: *Terminal) void {
+        self.showCursor();
+        std.posix.tcsetattr(self.tty.handle, .FLUSH, self.original_termios) catch {};
+        self.in_raw_mode = false;
+    }
+
     pub fn readKey(self: *Terminal) !Key {
         var buf: [1]u8 = undefined;
         const n = try self.tty.read(&buf);
@@ -381,4 +423,155 @@ pub fn runInteractive(allocator: std.mem.Allocator, items: []const ListItem) !st
             else => {},
         }
     }
+}
+
+/// Select from a list of items with inline display (no screen clear)
+/// Returns the selected index, or null if cancelled
+pub fn selectFromList(title: []const u8, items: []const []const u8) !?usize {
+    if (items.len == 0) return null;
+
+    const stdout = std.posix.STDOUT_FILENO;
+    var term = try Terminal.init();
+    defer term.deinit();
+
+    var selected: usize = 0;
+    const max_visible: usize = 10; // Show at most 10 items at a time
+    var scroll_offset: usize = 0;
+
+    // Enter raw mode (without clearing screen)
+    try term.enterRawModeInline();
+    defer term.exitRawModeInline();
+
+    // Initial render
+    renderSelectList(title, items, selected, scroll_offset, max_visible);
+
+    while (true) {
+        const key = try term.readKey();
+        var needs_redraw = false;
+
+        switch (key) {
+            .up => {
+                if (selected > 0) {
+                    selected -= 1;
+                    if (selected < scroll_offset) {
+                        scroll_offset = selected;
+                    }
+                    needs_redraw = true;
+                }
+            },
+            .down => {
+                if (selected + 1 < items.len) {
+                    selected += 1;
+                    if (selected >= scroll_offset + max_visible) {
+                        scroll_offset = selected - max_visible + 1;
+                    }
+                    needs_redraw = true;
+                }
+            },
+            .enter => {
+                // Move cursor to end and print selection confirmation
+                _ = std.posix.write(stdout, "\n") catch {};
+                return selected;
+            },
+            .escape, .ctrl_c, .ctrl_d => {
+                // Move cursor to end
+                _ = std.posix.write(stdout, "\n") catch {};
+                return null;
+            },
+            .char => |c| {
+                if (c == 'k' and selected > 0) {
+                    selected -= 1;
+                    if (selected < scroll_offset) {
+                        scroll_offset = selected;
+                    }
+                    needs_redraw = true;
+                } else if (c == 'j' and selected + 1 < items.len) {
+                    selected += 1;
+                    if (selected >= scroll_offset + max_visible) {
+                        scroll_offset = selected - max_visible + 1;
+                    }
+                    needs_redraw = true;
+                } else if (c == 'q') {
+                    _ = std.posix.write(stdout, "\n") catch {};
+                    return null;
+                }
+            },
+            else => {},
+        }
+
+        if (needs_redraw) {
+            // Move cursor up to beginning of list and redraw
+            const visible = @min(items.len, max_visible);
+            var buf: [32]u8 = undefined;
+            const up_seq = std.fmt.bufPrint(&buf, "\x1b[{d}A\r", .{visible + 2}) catch continue;
+            _ = std.posix.write(stdout, up_seq) catch {};
+            renderSelectList(title, items, selected, scroll_offset, max_visible);
+        }
+    }
+}
+
+fn renderSelectList(title: []const u8, items: []const []const u8, selected: usize, scroll_offset: usize, max_visible: usize) void {
+    const stdout = std.posix.STDOUT_FILENO;
+
+    // Title
+    ui.print("{s}{s}{s}\n", .{ ui.Style.bold, title, ui.Style.reset });
+
+    // Hint
+    ui.print("{s}↑/↓/j/k: navigate  Enter: select  q/Esc: cancel{s}\n", .{ ui.Style.dim, ui.Style.reset });
+
+    // Items
+    const end = @min(scroll_offset + max_visible, items.len);
+    for (items[scroll_offset..end], scroll_offset..) |item, i| {
+        // Clear line first
+        _ = std.posix.write(stdout, "\x1b[2K") catch {};
+
+        const is_selected = i == selected;
+        if (is_selected) {
+            ui.print("  {s}{s}{s} {s}{s}{s}\n", .{
+                ui.Style.blue,
+                ui.Style.arrow_right,
+                ui.Style.reset,
+                ui.Style.bold,
+                item,
+                ui.Style.reset,
+            });
+        } else {
+            ui.print("    {s}\n", .{item});
+        }
+    }
+
+    // Scroll indicator if needed
+    _ = std.posix.write(stdout, "\x1b[2K") catch {};
+    if (items.len > max_visible) {
+        ui.print("{s}[{d}/{d}]{s}", .{
+            ui.Style.dim,
+            selected + 1,
+            items.len,
+            ui.Style.reset,
+        });
+    }
+}
+
+/// Confirm with a yes/no prompt (inline, single keypress)
+/// Returns true for yes, false for no/cancel
+pub fn confirm(prompt: []const u8) !bool {
+    var term = try Terminal.init();
+    defer term.deinit();
+
+    // Print prompt
+    ui.print("{s} {s}[y/N]{s} ", .{ prompt, ui.Style.dim, ui.Style.reset });
+
+    // Enter raw mode for single keypress
+    try term.enterRawModeInline();
+    defer term.exitRawModeInline();
+
+    const key = try term.readKey();
+
+    // Print newline after response
+    ui.print("\n", .{});
+
+    return switch (key) {
+        .char => |c| c == 'y' or c == 'Y',
+        else => false,
+    };
 }
