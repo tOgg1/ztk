@@ -789,6 +789,37 @@ fn cmdModify(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
         return;
     }
 
+    // If there's only one commit, skip the selection prompt
+    if (stk.commits.len == 1) {
+        const target_commit = stk.commits[0];
+        ui.print("\n  Modifying: {s}{s}{s}\n", .{ ui.Style.bold, target_commit.title, ui.Style.reset });
+
+        git.commitFixup(allocator, target_commit.sha) catch {
+            ui.printError("Failed to create fixup commit\n", .{});
+            return;
+        };
+
+        var base_buf: [256]u8 = undefined;
+        const rebase_base = std.fmt.bufPrint(&base_buf, "{s}/{s}", .{ cfg.remote, cfg.main_branch }) catch {
+            ui.printError("Buffer overflow\n", .{});
+            return;
+        };
+
+        git.rebaseInteractiveAutosquash(allocator, rebase_base) catch {
+            ui.printError("Rebase failed. Resolve conflicts, then run 'git rebase --continue'.\n", .{});
+            return;
+        };
+
+        ui.print("  {s}{s}{s} Commit modified and stack rebased\n\n", .{ ui.Style.green, ui.Style.check, ui.Style.reset });
+
+        if (auto_update) {
+            cmdUpdate(allocator);
+        } else {
+            ui.print("  Run {s}ztk update{s} to sync changes to GitHub.\n\n", .{ ui.Style.bold, ui.Style.reset });
+        }
+        return;
+    }
+
     ui.print("\n  Select a commit to modify:\n\n", .{});
 
     var i: usize = stk.commits.len;
