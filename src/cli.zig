@@ -1498,6 +1498,7 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
     // Parse arguments
     var pr_number: ?u32 = null;
     var list_mode = false;
+    var interactive_mode = false;
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -1515,6 +1516,8 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
             }
         } else if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
             list_mode = true;
+        } else if (std.mem.eql(u8, arg, "--interactive") or std.mem.eql(u8, arg, "-i")) {
+            interactive_mode = true;
         }
     }
 
@@ -1547,8 +1550,9 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
     };
     defer gh_client.deinit();
 
-    // If no PR specified, find the PR for the current branch
-    const target_pr = if (pr_number) |num| num else blk: {
+    // Determine which PR to show reviews for
+    const target_pr: u32 = if (pr_number) |num| num else blk: {
+        // Need stack for interactive mode or current-branch lookup
         const stk = stack.readStack(allocator, cfg) catch |err| {
             ui.printError("Failed to read stack: {any}\n", .{err});
             return;
@@ -1563,31 +1567,143 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
             return;
         }
 
-        // Find PR for top commit
-        const top_commit = stk.commits[stk.commits.len - 1];
-        const id_suffix = if (top_commit.ztk_id) |id|
-            id[0..@min(8, id.len)]
-        else
-            top_commit.short_sha;
+        if (interactive_mode) {
+            // Interactive mode: let user select a PR from the stack
+            const SelectablePR = struct {
+                number: u32,
+                title: []const u8,
+            };
 
-        var branch_buf: [256]u8 = undefined;
-        const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
-            stk.head_branch,
-            id_suffix,
-        }) catch {
-            ui.printError("Buffer overflow\n", .{});
-            return;
-        };
+            var available_prs = std.ArrayListUnmanaged(SelectablePR){};
+            defer available_prs.deinit(allocator);
 
-        if (gh_client.findPR(branch_name) catch null) |pr| {
-            defer {
-                var mutable_pr = pr;
-                mutable_pr.deinit(allocator);
+            // Collect all PRs in the stack
+            for (stk.commits) |commit| {
+                if (commit.is_wip) continue;
+
+                const id_suffix = if (commit.ztk_id) |id|
+                    id[0..@min(8, id.len)]
+                else
+                    commit.short_sha;
+
+                var branch_buf: [256]u8 = undefined;
+                const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
+                    stk.head_branch,
+                    id_suffix,
+                }) catch continue;
+
+                if (gh_client.findPR(branch_name) catch null) |pr| {
+                    defer {
+                        var mutable_pr = pr;
+                        mutable_pr.deinit(allocator);
+                    }
+
+                    if (std.mem.eql(u8, pr.state, "closed")) continue;
+
+                    available_prs.append(allocator, .{
+                        .number = pr.number,
+                        .title = commit.title,
+                    }) catch continue;
+                }
             }
-            break :blk pr.number;
+
+            if (available_prs.items.len == 0) {
+                ui.printError("No PRs found in stack. Run 'ztk update' first.\n", .{});
+                return;
+            }
+
+            // If only one PR, just use it directly
+            if (available_prs.items.len == 1) {
+                break :blk available_prs.items[0].number;
+            }
+
+            // Show PR selector (top of stack first)
+            ui.print("\n  Select a PR to view reviews:\n\n", .{});
+
+            var display_idx: usize = available_prs.items.len;
+            while (display_idx > 0) {
+                display_idx -= 1;
+                const pr_info = available_prs.items[display_idx];
+                const num = available_prs.items.len - display_idx;
+                ui.print("    {s}[{d}]{s} {s}#{d}{s} {s}\n", .{
+                    ui.Style.dim,
+                    num,
+                    ui.Style.reset,
+                    ui.Style.blue,
+                    pr_info.number,
+                    ui.Style.reset,
+                    pr_info.title,
+                });
+            }
+
+            ui.print("\n", .{});
+            ui.print("  PR to view (1-{d}): ", .{available_prs.items.len});
+
+            var input_buf: [32]u8 = undefined;
+            var input_len: usize = 0;
+            const stdin_fd = std.posix.STDIN_FILENO;
+            while (input_len < input_buf.len) {
+                const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
+                    ui.printError("Failed to read input\n", .{});
+                    return;
+                };
+                if (bytes_read == 0) break;
+                input_len += bytes_read;
+                if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
+            }
+            const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
+
+            if (input == null) {
+                ui.print("\n  Cancelled.\n\n", .{});
+                return;
+            }
+
+            const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
+            if (trimmed.len == 0) {
+                ui.print("  Cancelled.\n\n", .{});
+                return;
+            }
+
+            const choice = std.fmt.parseInt(usize, trimmed, 10) catch {
+                ui.printError("Invalid input. Enter a number.\n", .{});
+                return;
+            };
+
+            if (choice < 1 or choice > available_prs.items.len) {
+                ui.printError("Invalid PR number: {d}. Must be between 1 and {d}.\n", .{ choice, available_prs.items.len });
+                return;
+            }
+
+            // Convert selection back to original index (was reversed for display)
+            const original_idx = available_prs.items.len - choice;
+            break :blk available_prs.items[original_idx].number;
         } else {
-            ui.printError("No PR found for current branch. Run 'ztk update' first.\n", .{});
-            return;
+            // Default: find PR for top commit
+            const top_commit = stk.commits[stk.commits.len - 1];
+            const id_suffix = if (top_commit.ztk_id) |id|
+                id[0..@min(8, id.len)]
+            else
+                top_commit.short_sha;
+
+            var branch_buf: [256]u8 = undefined;
+            const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
+                stk.head_branch,
+                id_suffix,
+            }) catch {
+                ui.printError("Buffer overflow\n", .{});
+                return;
+            };
+
+            if (gh_client.findPR(branch_name) catch null) |pr| {
+                defer {
+                    var mutable_pr = pr;
+                    mutable_pr.deinit(allocator);
+                }
+                break :blk pr.number;
+            } else {
+                ui.printError("No PR found for current branch. Run 'ztk update' first.\n", .{});
+                return;
+            }
         }
     };
 
@@ -1996,6 +2112,7 @@ fn printUsage() void {
         \\    -f, --force       Force merge (only blocked by merge conflicts)
         \\
         \\REVIEW OPTIONS:
+        \\    -i, --interactive Interactively select a PR to view reviews
         \\    --pr, -p <NUM>    Show feedback for specific PR number
         \\    --list, -l        Print feedback as a list (non-interactive)
         \\
@@ -2011,7 +2128,8 @@ fn printUsage() void {
         \\    ztk merge         # Merge ready PRs
         \\    ztk merge -i      # Interactively select which PRs to merge
         \\    ztk merge -r      # Merge and rebase local branch
-        \\    ztk review        # Interactive review feedback TUI
+        \\    ztk review        # Interactive review feedback TUI (current PR)
+        \\    ztk review -i     # Select a PR to view reviews
         \\    ztk review --list # Print feedback as list
         \\    ztk open          # Open a PR in the browser
         \\
