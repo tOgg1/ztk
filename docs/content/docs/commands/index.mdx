@@ -15,8 +15,11 @@ ztk provides a focused set of commands for managing stacked PRs.
 | `status` | `s`, `st` | Show status of the current stack |
 | `update` | `u`, `up` | Create/update PRs for commits in the stack |
 | `sync` | — | Fetch, rebase on main, and clean merged branches |
-| `modify` | `m` | Amend a commit in the middle of the stack |
+| `modify` | — | Amend a commit in the middle of the stack |
 | `absorb` | `a`, `ab` | Auto-amend staged changes into relevant commits |
+| `merge` | `m` | Merge all mergeable PRs bottom-up |
+| `review` | `r`, `rv` | View and copy PR review feedback |
+| `open` | `o` | Open a PR in the browser |
 | `help` | `--help`, `-h` | Show help message |
 
 ## Detailed Reference
@@ -28,4 +31,7 @@ ztk provides a focused set of commands for managing stacked PRs.
   <Card title="sync" href="/docs/commands/sync" description="Rebase on main and clean up" />
   <Card title="modify" href="/docs/commands/modify" description="Amend commits in the stack" />
   <Card title="absorb" href="/docs/commands/absorb" description="Auto-route changes to commits" />
+  <Card title="merge" href="/docs/commands/merge" description="Merge ready PRs bottom-up" />
+  <Card title="review" href="/docs/commands/review" description="View PR review feedback" />
+  <Card title="open" href="/docs/commands/open" description="Open PRs in browser" />
 </Cards>

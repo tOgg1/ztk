@@ -11,8 +11,14 @@ Interactively select and amend a commit in your stack.
 
 ```bash
 ztk modify
-ztk m       # alias
+ztk modify -u   # modify and update PRs
 ```
+
+## Options
+
+| Flag | Description |
+|------|-------------|
+| `-u`, `--update` | Run `ztk update` automatically after modifying |
 
 ## Prerequisites
 
@@ -48,6 +54,17 @@ The `modify` command lets you amend any commit in your stack, not just the most 
 
   Run ztk update to sync changes to GitHub.
 ```
+
+## With --update
+
+Use the `-u` flag to automatically sync to GitHub after modifying:
+
+```bash
+git add src/db.go
+ztk modify -u
+```
+
+This combines `modify` + `update` into one step — perfect for quick fixes.
 
 ## How It Works
 
