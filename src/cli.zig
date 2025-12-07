@@ -28,6 +28,7 @@ pub const Command = enum {
             .{ "s", .status },
             .{ "st", .status },
             .{ "update", .update },
+            .{ "push", .update },
             .{ "u", .update },
             .{ "up", .update },
             .{ "sync", .sync },
@@ -158,9 +159,9 @@ fn cmdStatus(allocator: std.mem.Allocator) void {
         return;
     };
     defer {
-        for (specs) |spec| {
-            allocator.free(spec.branch_name);
-            allocator.free(spec.base_ref);
+        for (specs) |*spec| {
+            var s = spec.*;
+            s.deinit(allocator);
         }
         allocator.free(specs);
     }
@@ -523,9 +524,9 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
         return;
     };
     defer {
-        for (specs) |spec| {
-            allocator.free(spec.branch_name);
-            allocator.free(spec.base_ref);
+        for (specs) |*spec| {
+            var s = spec.*;
+            s.deinit(allocator);
         }
         allocator.free(specs);
     }
@@ -564,11 +565,13 @@ fn cmdUpdate(allocator: std.mem.Allocator) void {
         };
         ui.print("    └─ Branch: {s}{s}{s}\n", .{ ui.Style.dim, spec.branch_name, ui.Style.reset });
 
-        git.push(allocator, cfg.remote, spec.branch_name, true) catch |err| {
+        const pushed = git.push(allocator, cfg.remote, spec.branch_name, true) catch |err| {
             ui.print("    └─ {s}Failed to push: {any}{s}\n", .{ ui.Style.red, err, ui.Style.reset });
             continue;
         };
-        ui.print("    └─ Pushed\n", .{});
+        if (pushed) {
+            ui.print("    └─ Pushed\n", .{});
+        }
 
         const existing_pr = gh_client.findPR(spec.branch_name) catch null;
         if (existing_pr) |pr| {
@@ -786,84 +789,49 @@ fn cmdModify(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
         return;
     }
 
-    ui.print("\n  Select a commit to modify:\n\n", .{});
+    ui.print("\n", .{});
+
+    // Build list of commit descriptions (in reverse order - newest first, with indices)
+    var commit_items = std.ArrayListUnmanaged([]const u8){};
+    defer {
+        for (commit_items.items) |item| {
+            allocator.free(item);
+        }
+        commit_items.deinit(allocator);
+    }
 
     var i: usize = stk.commits.len;
     while (i > 0) {
         i -= 1;
-        const commit = stk.commits[i];
         const num = stk.commits.len - i;
-        const is_current = i == stk.commits.len - 1;
-
-        if (is_current) {
-            ui.print("    {s}[{d}]{s} {s}{s}{s} {s}{s}{s}\n", .{
-                ui.Style.bold,
-                num,
-                ui.Style.reset,
-                ui.Style.green,
-                ui.Style.current,
-                ui.Style.reset,
-                ui.Style.bold,
-                commit.title,
-                ui.Style.reset,
-            });
-        } else {
-            ui.print("    {s}[{d}]{s} {s}{s}{s} {s}\n", .{
-                ui.Style.dim,
-                num,
-                ui.Style.reset,
-                ui.Style.blue,
-                ui.Style.other,
-                ui.Style.reset,
-                commit.title,
-            });
-        }
-    }
-
-    ui.print("\n", .{});
-
-    if (stk.commits.len == 1) {
-        ui.print("  Commit to modify (1): ", .{});
-    } else {
-        ui.print("  Commit to modify (1-{d}): ", .{stk.commits.len});
-    }
-
-    var input_buf: [32]u8 = undefined;
-    var input_len: usize = 0;
-    const stdin_fd = std.posix.STDIN_FILENO;
-    while (input_len < input_buf.len) {
-        const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
-            ui.printError("Failed to read input\n", .{});
+        var desc_buf: [256]u8 = undefined;
+        const desc = std.fmt.bufPrint(&desc_buf, "[{d}] {s}", .{ num, stk.commits[i].title }) catch {
+            ui.printError("Failed to format commit description\n", .{});
             return;
         };
-        if (bytes_read == 0) break;
-        input_len += bytes_read;
-        if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
+        const desc_copy = allocator.dupe(u8, desc) catch {
+            ui.printError("Failed to allocate memory\n", .{});
+            return;
+        };
+        commit_items.append(allocator, desc_copy) catch {
+            allocator.free(desc_copy);
+            ui.printError("Failed to allocate memory\n", .{});
+            return;
+        };
     }
-    const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
 
-    if (input == null) {
-        ui.print("\n  Cancelled.\n\n", .{});
+    const selected = tui.selectFromList("Select a commit to modify:", commit_items.items) catch {
+        ui.printError("Failed to display selection\n", .{});
         return;
-    }
+    };
 
-    const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
-    if (trimmed.len == 0) {
+    if (selected == null) {
         ui.print("  Cancelled.\n\n", .{});
         return;
     }
 
-    const commit_num = std.fmt.parseInt(usize, trimmed, 10) catch {
-        ui.printError("Invalid input. Enter a number.\n", .{});
-        return;
-    };
-
-    if (commit_num < 1 or commit_num > stk.commits.len) {
-        ui.printError("Invalid commit number: {d}. Must be between 1 and {d}.\n", .{ commit_num, stk.commits.len });
-        return;
-    }
-
-    const commit_idx = stk.commits.len - commit_num;
+    // Convert selection index back to commit index (reverse order)
+    const commit_idx = stk.commits.len - 1 - selected.?;
     const target_commit = stk.commits[commit_idx];
 
     ui.print("\n  Modifying: {s}{s}{s}\n", .{ ui.Style.bold, target_commit.title, ui.Style.reset });
@@ -1128,34 +1096,20 @@ fn cmdAbsorb(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
         });
     }
 
-    ui.print("  Absorb {d} hunk{s} into {d} commit{s}? [y/N]: ", .{
+    var prompt_buf: [128]u8 = undefined;
+    const confirm_prompt = std.fmt.bufPrint(&prompt_buf, "Absorb {d} hunk{s} into {d} commit{s}?", .{
         total_hunks,
         if (total_hunks == 1) "" else "s",
         absorb_map.count(),
         if (absorb_map.count() == 1) "" else "s",
-    });
+    }) catch "Absorb hunks?";
 
-    var input_buf: [32]u8 = undefined;
-    var input_len: usize = 0;
-    const stdin_fd = std.posix.STDIN_FILENO;
-    while (input_len < input_buf.len) {
-        const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
-            ui.printError("Failed to read input\n", .{});
-            return;
-        };
-        if (bytes_read == 0) break;
-        input_len += bytes_read;
-        if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
-    }
-    const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
-
-    if (input == null) {
-        ui.print("\n  Cancelled.\n\n", .{});
+    const confirmed = tui.confirm(confirm_prompt) catch {
+        ui.printError("Failed to read confirmation\n", .{});
         return;
-    }
+    };
 
-    const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
-    if (trimmed.len == 0 or (trimmed[0] != 'y' and trimmed[0] != 'Y')) {
+    if (!confirmed) {
         ui.print("  Cancelled.\n\n", .{});
         return;
     }
@@ -1244,6 +1198,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
     var auto_rebase = false;
     var skip_review = false;
     var force = false;
+    var interactive = false;
     for (args[2..]) |arg| {
         if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--rebase")) {
             auto_rebase = true;
@@ -1253,6 +1208,9 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
         }
         if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
             force = true;
+        }
+        if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--interactive")) {
+            interactive = true;
         }
     }
 
@@ -1405,12 +1363,54 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
         return;
     }
 
-    const top_pr = pr_infos.items[mergeable_count - 1];
+    // Interactive mode: let user select up to which PR to merge
+    var selected_count = mergeable_count;
+    if (interactive and mergeable_count > 1) {
+        ui.print("  Select PR to merge up to (1-{d}), or press Enter for all: ", .{mergeable_count});
+
+        var input_buf: [32]u8 = undefined;
+        var input_len: usize = 0;
+        const stdin_fd = std.posix.STDIN_FILENO;
+        while (input_len < input_buf.len) {
+            const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
+                ui.printError("Failed to read input\n", .{});
+                return;
+            };
+            if (bytes_read == 0) break;
+            input_len += bytes_read;
+            if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
+        }
+        const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
+
+        if (input == null) {
+            ui.print("\n  Cancelled.\n\n", .{});
+            return;
+        }
+
+        const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
+        if (trimmed.len > 0) {
+            const selection = std.fmt.parseInt(usize, trimmed, 10) catch {
+                ui.printError("Invalid input. Enter a number.\n", .{});
+                return;
+            };
+
+            if (selection < 1 or selection > mergeable_count) {
+                ui.printError("Invalid selection: {d}. Must be between 1 and {d}.\n", .{ selection, mergeable_count });
+                return;
+            }
+
+            selected_count = selection;
+        }
+
+        ui.print("\n", .{});
+    }
+
+    const top_pr = pr_infos.items[selected_count - 1];
 
     ui.print("  {s}Merging {d} commit{s} via PR #{d}...{s}\n", .{
         ui.Style.bold,
-        mergeable_count,
-        if (mergeable_count == 1) "" else "s",
+        selected_count,
+        if (selected_count == 1) "" else "s",
         top_pr.number,
         ui.Style.reset,
     });
@@ -1432,11 +1432,11 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
 
     gh_client.deleteBranch(top_pr.branch_name) catch {};
 
-    if (mergeable_count > 1) {
+    if (selected_count > 1) {
         ui.print("\n", .{});
-        ui.print("  Closing {d} merged PR{s}...\n", .{ mergeable_count - 1, if (mergeable_count == 2) "" else "s" });
+        ui.print("  Closing {d} merged PR{s}...\n", .{ selected_count - 1, if (selected_count == 2) "" else "s" });
 
-        for (pr_infos.items[0 .. mergeable_count - 1]) |info| {
+        for (pr_infos.items[0 .. selected_count - 1]) |info| {
             var comment_buf: [512]u8 = undefined;
             const comment = std.fmt.bufPrint(&comment_buf, "Commit merged in pull request #{d}", .{top_pr.number}) catch continue;
 
@@ -1452,8 +1452,8 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
     ui.print("  {s}{s} Merged {d} commit{s} via #{d}{s}\n", .{
         ui.Style.green,
         ui.Style.check,
-        mergeable_count,
-        if (mergeable_count == 1) "" else "s",
+        selected_count,
+        if (selected_count == 1) "" else "s",
         top_pr.number,
         ui.Style.reset,
     });
@@ -1901,60 +1901,45 @@ fn cmdOpen(allocator: std.mem.Allocator) void {
     }
 
     // Multiple PRs - show selector
-    ui.print("\n  Select a PR to open:\n\n", .{});
+    ui.print("\n", .{});
 
-    for (prs.items, 0..) |pr, idx| {
-        const num = idx + 1;
-        ui.print("    {s}[{d}]{s} {s}#{d}{s} {s}\n", .{
-            ui.Style.dim,
-            num,
-            ui.Style.reset,
-            ui.Style.blue,
-            pr.number,
-            ui.Style.reset,
-            pr.title,
-        });
+    // Build list of PR descriptions
+    var pr_items = std.ArrayListUnmanaged([]const u8){};
+    defer {
+        for (pr_items.items) |item| {
+            allocator.free(item);
+        }
+        pr_items.deinit(allocator);
     }
 
-    ui.print("\n", .{});
-    ui.print("  PR to open (1-{d}): ", .{prs.items.len});
-
-    var input_buf: [32]u8 = undefined;
-    var input_len: usize = 0;
-    const stdin_fd = std.posix.STDIN_FILENO;
-    while (input_len < input_buf.len) {
-        const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
-            ui.printError("Failed to read input\n", .{});
+    for (prs.items) |pr| {
+        var desc_buf: [256]u8 = undefined;
+        const desc = std.fmt.bufPrint(&desc_buf, "#{d} {s}", .{ pr.number, pr.title }) catch {
+            ui.printError("Failed to format PR description\n", .{});
             return;
         };
-        if (bytes_read == 0) break;
-        input_len += bytes_read;
-        if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
+        const desc_copy = allocator.dupe(u8, desc) catch {
+            ui.printError("Failed to allocate memory\n", .{});
+            return;
+        };
+        pr_items.append(allocator, desc_copy) catch {
+            allocator.free(desc_copy);
+            ui.printError("Failed to allocate memory\n", .{});
+            return;
+        };
     }
-    const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
 
-    if (input == null) {
-        ui.print("\n  Cancelled.\n\n", .{});
+    const selected = tui.selectFromList("Select a PR to open:", pr_items.items) catch {
+        ui.printError("Failed to display selection\n", .{});
         return;
-    }
+    };
 
-    const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
-    if (trimmed.len == 0) {
+    if (selected == null) {
         ui.print("  Cancelled.\n\n", .{});
         return;
     }
 
-    const pr_num = std.fmt.parseInt(usize, trimmed, 10) catch {
-        ui.printError("Invalid input. Enter a number.\n", .{});
-        return;
-    };
-
-    if (pr_num < 1 or pr_num > prs.items.len) {
-        ui.printError("Invalid PR number: {d}. Must be between 1 and {d}.\n", .{ pr_num, prs.items.len });
-        return;
-    }
-
-    const selected_pr = prs.items[pr_num - 1];
+    const selected_pr = prs.items[selected.?];
     ui.print("\n  Opening PR #{d}: {s}\n\n", .{ selected_pr.number, selected_pr.title });
     openUrl(allocator, selected_pr.url);
 }
@@ -1992,7 +1977,7 @@ fn printUsage() void {
         \\COMMANDS:
         \\    init              Initialize ztk in the current repository
         \\    status, s, st     Show status of the current stack
-        \\    update, u, up     Create/update pull requests for commits in the stack
+        \\    update, push, u   Create/update pull requests for commits in the stack
         \\    sync              Fetch, rebase on main, and clean merged branches
         \\    modify            Amend a commit in the middle of the stack
         \\    absorb, a, ab     Auto-amend staged changes into relevant commits
@@ -2005,6 +1990,7 @@ fn printUsage() void {
         \\    -u, --update      Run 'ztk update' after successful modify/absorb
         \\
         \\MERGE OPTIONS:
+        \\    -i, --interactive Interactively select up to which PR to merge
         \\    -r, --rebase      Rebase current branch onto updated main after merge
         \\    -n, --no-review   Merge without requiring an approved review
         \\    -f, --force       Force merge (only blocked by merge conflicts)
@@ -2023,6 +2009,7 @@ fn printUsage() void {
         \\    ztk absorb        # Auto-absorb staged changes
         \\    ztk absorb -u     # Absorb and sync to GitHub
         \\    ztk merge         # Merge ready PRs
+        \\    ztk merge -i      # Interactively select which PRs to merge
         \\    ztk merge -r      # Merge and rebase local branch
         \\    ztk review        # Interactive review feedback TUI
         \\    ztk review --list # Print feedback as list

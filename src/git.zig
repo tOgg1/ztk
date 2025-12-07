@@ -217,7 +217,30 @@ pub fn ensureBranchAt(allocator: std.mem.Allocator, branch: []const u8, sha: []c
     if (output) |o| allocator.free(o) else |_| {}
 }
 
-pub fn push(allocator: std.mem.Allocator, remote: []const u8, branch: []const u8, force: bool) GitError!void {
+/// Returns true if a push was performed, false if already up-to-date
+pub fn push(allocator: std.mem.Allocator, remote: []const u8, branch: []const u8, force: bool) GitError!bool {
+    // Get local branch SHA
+    const local_sha = try run(allocator, &.{ "rev-parse", branch });
+    defer allocator.free(local_sha);
+    const local_trimmed = std.mem.trim(u8, local_sha, "\n\r ");
+
+    // Get remote branch SHA (may not exist)
+    const remote_ref = std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote, branch }) catch return GitError.OutOfMemory;
+    defer allocator.free(remote_ref);
+
+    const remote_sha = run(allocator, &.{ "rev-parse", remote_ref });
+    if (remote_sha) |sha| {
+        defer allocator.free(sha);
+        const remote_trimmed = std.mem.trim(u8, sha, "\n\r ");
+
+        // If local and remote are the same, no need to push
+        if (std.mem.eql(u8, local_trimmed, remote_trimmed)) {
+            return false;
+        }
+    } else |_| {
+        // Remote branch doesn't exist yet, need to push
+    }
+
     if (force) {
         const output = try run(allocator, &.{ "push", "--force", remote, branch });
         allocator.free(output);
@@ -225,6 +248,7 @@ pub fn push(allocator: std.mem.Allocator, remote: []const u8, branch: []const u8
         const output = try run(allocator, &.{ "push", remote, branch });
         allocator.free(output);
     }
+    return true;
 }
 
 pub fn getRemoteUrl(allocator: std.mem.Allocator, remote: []const u8) GitError![]u8 {
