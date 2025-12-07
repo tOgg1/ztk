@@ -789,49 +789,84 @@ fn cmdModify(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
         return;
     }
 
-    ui.print("\n", .{});
-
-    // Build list of commit descriptions (in reverse order - newest first, with indices)
-    var commit_items = std.ArrayListUnmanaged([]const u8){};
-    defer {
-        for (commit_items.items) |item| {
-            allocator.free(item);
-        }
-        commit_items.deinit(allocator);
-    }
+    ui.print("\n  Select a commit to modify:\n\n", .{});
 
     var i: usize = stk.commits.len;
     while (i > 0) {
         i -= 1;
+        const commit = stk.commits[i];
         const num = stk.commits.len - i;
-        var desc_buf: [256]u8 = undefined;
-        const desc = std.fmt.bufPrint(&desc_buf, "[{d}] {s}", .{ num, stk.commits[i].title }) catch {
-            ui.printError("Failed to format commit description\n", .{});
-            return;
-        };
-        const desc_copy = allocator.dupe(u8, desc) catch {
-            ui.printError("Failed to allocate memory\n", .{});
-            return;
-        };
-        commit_items.append(allocator, desc_copy) catch {
-            allocator.free(desc_copy);
-            ui.printError("Failed to allocate memory\n", .{});
-            return;
-        };
+        const is_current = i == stk.commits.len - 1;
+
+        if (is_current) {
+            ui.print("    {s}[{d}]{s} {s}{s}{s} {s}{s}{s}\n", .{
+                ui.Style.bold,
+                num,
+                ui.Style.reset,
+                ui.Style.green,
+                ui.Style.current,
+                ui.Style.reset,
+                ui.Style.bold,
+                commit.title,
+                ui.Style.reset,
+            });
+        } else {
+            ui.print("    {s}[{d}]{s} {s}{s}{s} {s}\n", .{
+                ui.Style.dim,
+                num,
+                ui.Style.reset,
+                ui.Style.blue,
+                ui.Style.other,
+                ui.Style.reset,
+                commit.title,
+            });
+        }
     }
 
-    const selected = tui.selectFromList("Select a commit to modify:", commit_items.items) catch {
-        ui.printError("Failed to display selection\n", .{});
-        return;
-    };
+    ui.print("\n", .{});
 
-    if (selected == null) {
+    if (stk.commits.len == 1) {
+        ui.print("  Commit to modify (1): ", .{});
+    } else {
+        ui.print("  Commit to modify (1-{d}): ", .{stk.commits.len});
+    }
+
+    var input_buf: [32]u8 = undefined;
+    var input_len: usize = 0;
+    const stdin_fd = std.posix.STDIN_FILENO;
+    while (input_len < input_buf.len) {
+        const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
+            ui.printError("Failed to read input\n", .{});
+            return;
+        };
+        if (bytes_read == 0) break;
+        input_len += bytes_read;
+        if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
+    }
+    const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
+
+    if (input == null) {
+        ui.print("\n  Cancelled.\n\n", .{});
+        return;
+    }
+
+    const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
+    if (trimmed.len == 0) {
         ui.print("  Cancelled.\n\n", .{});
         return;
     }
 
-    // Convert selection index back to commit index (reverse order)
-    const commit_idx = stk.commits.len - 1 - selected.?;
+    const commit_num = std.fmt.parseInt(usize, trimmed, 10) catch {
+        ui.printError("Invalid input. Enter a number.\n", .{});
+        return;
+    };
+
+    if (commit_num < 1 or commit_num > stk.commits.len) {
+        ui.printError("Invalid commit number: {d}. Must be between 1 and {d}.\n", .{ commit_num, stk.commits.len });
+        return;
+    }
+
+    const commit_idx = stk.commits.len - commit_num;
     const target_commit = stk.commits[commit_idx];
 
     ui.print("\n  Modifying: {s}{s}{s}\n", .{ ui.Style.bold, target_commit.title, ui.Style.reset });
@@ -1096,20 +1131,34 @@ fn cmdAbsorb(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
         });
     }
 
-    var prompt_buf: [128]u8 = undefined;
-    const confirm_prompt = std.fmt.bufPrint(&prompt_buf, "Absorb {d} hunk{s} into {d} commit{s}?", .{
+    ui.print("  Absorb {d} hunk{s} into {d} commit{s}? [y/N]: ", .{
         total_hunks,
         if (total_hunks == 1) "" else "s",
         absorb_map.count(),
         if (absorb_map.count() == 1) "" else "s",
-    }) catch "Absorb hunks?";
+    });
 
-    const confirmed = tui.confirm(confirm_prompt) catch {
-        ui.printError("Failed to read confirmation\n", .{});
+    var input_buf: [32]u8 = undefined;
+    var input_len: usize = 0;
+    const stdin_fd = std.posix.STDIN_FILENO;
+    while (input_len < input_buf.len) {
+        const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
+            ui.printError("Failed to read input\n", .{});
+            return;
+        };
+        if (bytes_read == 0) break;
+        input_len += bytes_read;
+        if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
+    }
+    const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
+
+    if (input == null) {
+        ui.print("\n  Cancelled.\n\n", .{});
         return;
-    };
+    }
 
-    if (!confirmed) {
+    const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
+    if (trimmed.len == 0 or (trimmed[0] != 'y' and trimmed[0] != 'Y')) {
         ui.print("  Cancelled.\n\n", .{});
         return;
     }
@@ -1494,11 +1543,153 @@ const FeedbackItem = union(enum) {
     review_summary: review.Review,
 };
 
+/// Global state for review TUI callbacks (needed because Zig doesn't support closures)
+const ReviewTUIState = struct {
+    var allocator: std.mem.Allocator = undefined;
+    var feedback_items: std.ArrayListUnmanaged(FeedbackItem) = .{};
+    var pr_summaries: std.ArrayListUnmanaged(review.PRReviewSummary) = .{};
+    var secondary_strings: std.ArrayListUnmanaged([]const u8) = .{};
+    var tui_items: std.ArrayListUnmanaged(tui.ListItem) = .{};
+    var pr_infos: std.ArrayListUnmanaged(tui.PRInfo) = .{};
+    var pr_context: ?prompt.PromptContext = null;
+
+    fn init(alloc: std.mem.Allocator) void {
+        allocator = alloc;
+        feedback_items = .{};
+        pr_summaries = .{};
+        secondary_strings = .{};
+        tui_items = .{};
+        pr_infos = .{};
+        pr_context = null;
+    }
+
+    fn deinit() void {
+        for (secondary_strings.items) |s| allocator.free(s);
+        secondary_strings.deinit(allocator);
+
+        feedback_items.deinit(allocator);
+        tui_items.deinit(allocator);
+
+        for (pr_summaries.items) |*s| s.deinit(allocator);
+        pr_summaries.deinit(allocator);
+
+        pr_infos.deinit(allocator);
+    }
+
+    fn copyCallback(selected: usize, copy_llm: bool) void {
+        if (selected >= feedback_items.items.len) return;
+
+        const item = feedback_items.items[selected];
+        if (copy_llm) {
+            const context = pr_context orelse prompt.PromptContext{
+                .pr_title = "",
+                .pr_number = 0,
+                .branch = "",
+            };
+
+            const formatted = switch (item) {
+                .comment => |c| prompt.formatCommentFull(allocator, c, context) catch return,
+                .review_summary => |rv| prompt.formatReview(allocator, rv, context) catch return,
+            };
+            defer allocator.free(formatted);
+            clipboard.copy(allocator, formatted) catch {};
+        } else {
+            const text = switch (item) {
+                .comment => |c| c.body,
+                .review_summary => |rv| rv.body orelse "",
+            };
+            clipboard.copy(allocator, text) catch {};
+        }
+    }
+
+    fn prChangeCallback(alloc: std.mem.Allocator, pr_index: usize) ?[]const tui.ListItem {
+        _ = alloc;
+        if (pr_index >= pr_summaries.items.len) return null;
+
+        // Clear previous items
+        for (secondary_strings.items) |s| allocator.free(s);
+        secondary_strings.clearRetainingCapacity();
+        feedback_items.clearRetainingCapacity();
+        tui_items.clearRetainingCapacity();
+
+        const summary = &pr_summaries.items[pr_index];
+
+        // Update context for copy operations
+        pr_context = prompt.PromptContext{
+            .pr_title = summary.pr_title,
+            .pr_number = summary.pr_number,
+            .branch = summary.branch,
+        };
+
+        // Build items for this PR
+        buildItemsForSummary(summary);
+
+        return tui_items.items;
+    }
+
+    fn buildItemsForSummary(summary: *review.PRReviewSummary) void {
+        // Add reviews with bodies
+        for (summary.reviews) |rv| {
+            if (rv.state == .pending) continue;
+            if (rv.body == null) continue;
+
+            const item_type: tui.ItemType = switch (rv.state) {
+                .approved => .review_approved,
+                .changes_requested => .review_changes_requested,
+                .commented => .review_commented,
+                else => .review_pending,
+            };
+
+            tui_items.append(allocator, .{
+                .primary = rv.author,
+                .secondary = rv.state.toString(),
+                .detail = rv.body,
+                .context = null,
+                .item_type = item_type,
+            }) catch continue;
+
+            feedback_items.append(allocator, .{ .review_summary = rv }) catch {
+                _ = tui_items.pop();
+                continue;
+            };
+        }
+
+        // Add inline comments
+        for (summary.comments) |comment| {
+            const secondary: ?[]const u8 = if (comment.path) |path| blk: {
+                if (comment.line) |line| {
+                    const formatted = std.fmt.allocPrint(allocator, "{s}:{d}", .{ path, line }) catch break :blk path;
+                    secondary_strings.append(allocator, formatted) catch {
+                        allocator.free(formatted);
+                        break :blk path;
+                    };
+                    break :blk formatted;
+                } else {
+                    break :blk path;
+                }
+            } else null;
+
+            tui_items.append(allocator, .{
+                .primary = comment.author,
+                .secondary = secondary,
+                .detail = comment.body,
+                .context = null,
+                .item_type = .comment,
+            }) catch continue;
+
+            feedback_items.append(allocator, .{ .comment = comment }) catch {
+                _ = tui_items.pop();
+                continue;
+            };
+        }
+    }
+};
+
 fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
     // Parse arguments
     var pr_number: ?u32 = null;
     var list_mode = false;
-    var interactive_mode = false;
+    var stack_mode = false;
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -1516,8 +1707,8 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
             }
         } else if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
             list_mode = true;
-        } else if (std.mem.eql(u8, arg, "--interactive") or std.mem.eql(u8, arg, "-i")) {
-            interactive_mode = true;
+        } else if (std.mem.eql(u8, arg, "--stack") or std.mem.eql(u8, arg, "-s")) {
+            stack_mode = true;
         }
     }
 
@@ -1550,174 +1741,165 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
     };
     defer gh_client.deinit();
 
-    // Determine which PR to show reviews for
-    const target_pr: u32 = if (pr_number) |num| num else blk: {
-        // Need stack for interactive mode or current-branch lookup
-        const stk = stack.readStack(allocator, cfg) catch |err| {
-            ui.printError("Failed to read stack: {any}\n", .{err});
-            return;
-        };
-        defer {
-            var s = stk;
-            s.deinit(allocator);
-        }
+    const stk = stack.readStack(allocator, cfg) catch |err| {
+        ui.printError("Failed to read stack: {any}\n", .{err});
+        return;
+    };
+    defer {
+        var s = stk;
+        s.deinit(allocator);
+    }
 
-        if (stk.commits.len == 0) {
-            ui.printError("No commits in stack. Nothing to review.\n", .{});
-            return;
-        }
+    if (stk.commits.len == 0) {
+        ui.printError("No commits in stack. Nothing to review.\n", .{});
+        return;
+    }
 
-        if (interactive_mode) {
-            // Interactive mode: let user select a PR from the stack
-            const SelectablePR = struct {
-                number: u32,
-                title: []const u8,
-            };
+    // Initialize global state
+    ReviewTUIState.init(allocator);
+    defer ReviewTUIState.deinit();
 
-            var available_prs = std.ArrayListUnmanaged(SelectablePR){};
-            defer available_prs.deinit(allocator);
+    if (stack_mode) {
+        // Get reviews for all PRs in the stack
+        var current_pr_index: usize = 0;
 
-            // Collect all PRs in the stack
-            for (stk.commits) |commit| {
-                if (commit.is_wip) continue;
+        // Collect all PRs in the stack (bottom to top order in stack, but we iterate for display)
+        for (stk.commits, 0..) |commit, idx| {
+            if (commit.is_wip) continue;
 
-                const id_suffix = if (commit.ztk_id) |id|
-                    id[0..@min(8, id.len)]
-                else
-                    commit.short_sha;
-
-                var branch_buf: [256]u8 = undefined;
-                const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
-                    stk.head_branch,
-                    id_suffix,
-                }) catch continue;
-
-                if (gh_client.findPR(branch_name) catch null) |pr| {
-                    defer {
-                        var mutable_pr = pr;
-                        mutable_pr.deinit(allocator);
-                    }
-
-                    if (std.mem.eql(u8, pr.state, "closed")) continue;
-
-                    available_prs.append(allocator, .{
-                        .number = pr.number,
-                        .title = commit.title,
-                    }) catch continue;
-                }
-            }
-
-            if (available_prs.items.len == 0) {
-                ui.printError("No PRs found in stack. Run 'ztk update' first.\n", .{});
-                return;
-            }
-
-            // If only one PR, just use it directly
-            if (available_prs.items.len == 1) {
-                break :blk available_prs.items[0].number;
-            }
-
-            // Show PR selector (top of stack first)
-            ui.print("\n  Select a PR to view reviews:\n\n", .{});
-
-            var display_idx: usize = available_prs.items.len;
-            while (display_idx > 0) {
-                display_idx -= 1;
-                const pr_info = available_prs.items[display_idx];
-                const num = available_prs.items.len - display_idx;
-                ui.print("    {s}[{d}]{s} {s}#{d}{s} {s}\n", .{
-                    ui.Style.dim,
-                    num,
-                    ui.Style.reset,
-                    ui.Style.blue,
-                    pr_info.number,
-                    ui.Style.reset,
-                    pr_info.title,
-                });
-            }
-
-            ui.print("\n", .{});
-            ui.print("  PR to view (1-{d}): ", .{available_prs.items.len});
-
-            var input_buf: [32]u8 = undefined;
-            var input_len: usize = 0;
-            const stdin_fd = std.posix.STDIN_FILENO;
-            while (input_len < input_buf.len) {
-                const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
-                    ui.printError("Failed to read input\n", .{});
-                    return;
-                };
-                if (bytes_read == 0) break;
-                input_len += bytes_read;
-                if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
-            }
-            const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
-
-            if (input == null) {
-                ui.print("\n  Cancelled.\n\n", .{});
-                return;
-            }
-
-            const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
-            if (trimmed.len == 0) {
-                ui.print("  Cancelled.\n\n", .{});
-                return;
-            }
-
-            const choice = std.fmt.parseInt(usize, trimmed, 10) catch {
-                ui.printError("Invalid input. Enter a number.\n", .{});
-                return;
-            };
-
-            if (choice < 1 or choice > available_prs.items.len) {
-                ui.printError("Invalid PR number: {d}. Must be between 1 and {d}.\n", .{ choice, available_prs.items.len });
-                return;
-            }
-
-            // Convert selection back to original index (was reversed for display)
-            const original_idx = available_prs.items.len - choice;
-            break :blk available_prs.items[original_idx].number;
-        } else {
-            // Default: find PR for top commit
-            const top_commit = stk.commits[stk.commits.len - 1];
-            const id_suffix = if (top_commit.ztk_id) |id|
+            const id_suffix = if (commit.ztk_id) |id|
                 id[0..@min(8, id.len)]
             else
-                top_commit.short_sha;
+                commit.short_sha;
 
             var branch_buf: [256]u8 = undefined;
             const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
                 stk.head_branch,
                 id_suffix,
-            }) catch {
-                ui.printError("Buffer overflow\n", .{});
-                return;
-            };
+            }) catch continue;
 
             if (gh_client.findPR(branch_name) catch null) |pr| {
                 defer {
                     var mutable_pr = pr;
                     mutable_pr.deinit(allocator);
                 }
-                break :blk pr.number;
-            } else {
-                ui.printError("No PR found for current branch. Run 'ztk update' first.\n", .{});
-                return;
+
+                if (std.mem.eql(u8, pr.state, "closed")) continue;
+
+                // Fetch review summary for this PR
+                var summary = gh_client.getPRReviewSummary(pr.number) catch continue;
+
+                ReviewTUIState.pr_summaries.append(allocator, summary) catch {
+                    summary.deinit(allocator);
+                    continue;
+                };
+
+                ReviewTUIState.pr_infos.append(allocator, .{
+                    .number = pr.number,
+                    .title = commit.title,
+                }) catch {
+                    // Roll back pr_summaries append to keep lists in sync
+                    // We just appended so the list is guaranteed non-empty
+                    if (ReviewTUIState.pr_summaries.pop()) |popped| {
+                        var item = popped;
+                        item.deinit(allocator);
+                    }
+                    continue;
+                };
+
+                // Track which PR is "current" (top of stack)
+                if (idx == stk.commits.len - 1) {
+                    current_pr_index = ReviewTUIState.pr_summaries.items.len - 1;
+                }
             }
         }
-    };
 
-    // Get review summary
-    var summary = gh_client.getPRReviewSummary(target_pr) catch |err| {
-        ui.printError("Failed to get PR review summary: {any}\n", .{err});
-        return;
-    };
-    defer summary.deinit(allocator);
+        if (ReviewTUIState.pr_summaries.items.len == 0) {
+            ui.printError("No PRs found in stack. Run 'ztk update' first.\n", .{});
+            return;
+        }
 
-    if (list_mode) {
-        printReviewList(allocator, &summary);
+        // Build initial items for current PR
+        if (current_pr_index < ReviewTUIState.pr_summaries.items.len) {
+            const summary = &ReviewTUIState.pr_summaries.items[current_pr_index];
+            ReviewTUIState.pr_context = prompt.PromptContext{
+                .pr_title = summary.pr_title,
+                .pr_number = summary.pr_number,
+                .branch = summary.branch,
+            };
+            ReviewTUIState.buildItemsForSummary(summary);
+        }
+
+        if (list_mode) {
+            // Print all PRs in list mode
+            for (ReviewTUIState.pr_summaries.items) |*summary| {
+                printReviewList(allocator, summary);
+            }
+        } else {
+            // Run TUI with PR navigation
+            tui.runInteractive(
+                allocator,
+                ReviewTUIState.tui_items.items,
+                ReviewTUIState.copyCallback,
+                ReviewTUIState.pr_infos.items,
+                &current_pr_index,
+                ReviewTUIState.prChangeCallback,
+            ) catch |err| {
+                ui.printError("TUI error: {any}\n", .{err});
+            };
+        }
+    } else if (pr_number) |num| {
+        // Single PR mode with explicit PR number
+        var summary = gh_client.getPRReviewSummary(num) catch |err| {
+            ui.printError("Failed to get PR review summary: {any}\n", .{err});
+            return;
+        };
+        defer summary.deinit(allocator);
+
+        if (list_mode) {
+            printReviewList(allocator, &summary);
+        } else {
+            runReviewTUISingle(allocator, &summary);
+        }
     } else {
-        runReviewTUI(allocator, &summary);
+        // Default: find PR for current branch (top commit)
+        const top_commit = stk.commits[stk.commits.len - 1];
+        const id_suffix = if (top_commit.ztk_id) |id|
+            id[0..@min(8, id.len)]
+        else
+            top_commit.short_sha;
+
+        var branch_buf: [256]u8 = undefined;
+        const branch_name = std.fmt.bufPrint(&branch_buf, "ztk/{s}/{s}", .{
+            stk.head_branch,
+            id_suffix,
+        }) catch {
+            ui.printError("Buffer overflow\n", .{});
+            return;
+        };
+
+        const target_pr = if (gh_client.findPR(branch_name) catch null) |pr| blk: {
+            defer {
+                var mutable_pr = pr;
+                mutable_pr.deinit(allocator);
+            }
+            break :blk pr.number;
+        } else {
+            ui.printError("No PR found for current branch. Run 'ztk update' first.\n", .{});
+            return;
+        };
+
+        var summary = gh_client.getPRReviewSummary(target_pr) catch |err| {
+            ui.printError("Failed to get PR review summary: {any}\n", .{err});
+            return;
+        };
+        defer summary.deinit(allocator);
+
+        if (list_mode) {
+            printReviewList(allocator, &summary);
+        } else {
+            runReviewTUISingle(allocator, &summary);
+        }
     }
 }
 
@@ -1791,126 +1973,40 @@ fn printReviewList(allocator: std.mem.Allocator, summary: *review.PRReviewSummar
     });
 }
 
-fn runReviewTUI(allocator: std.mem.Allocator, summary: *review.PRReviewSummary) void {
-    // Build list items for TUI
-    var items = std.ArrayListUnmanaged(tui.ListItem){};
-    defer items.deinit(allocator);
+fn runReviewTUISingle(allocator: std.mem.Allocator, summary: *review.PRReviewSummary) void {
+    // Set up context for copy callback
+    ReviewTUIState.pr_context = prompt.PromptContext{
+        .pr_title = summary.pr_title,
+        .pr_number = summary.pr_number,
+        .branch = summary.branch,
+    };
 
-    var feedback_items = std.ArrayListUnmanaged(FeedbackItem){};
-    defer feedback_items.deinit(allocator);
+    // Build items using shared function
+    ReviewTUIState.buildItemsForSummary(summary);
 
-    // Add reviews with bodies
-    for (summary.reviews) |rv| {
-        if (rv.state == .pending) continue;
-        if (rv.body == null) continue;
-
-        const item_type: tui.ItemType = switch (rv.state) {
-            .approved => .review_approved,
-            .changes_requested => .review_changes_requested,
-            .commented => .review_commented,
-            else => .review_pending,
-        };
-
-        // Append both items atomically - if one fails, don't add either
-        items.append(allocator, .{
-            .primary = rv.author,
-            .secondary = rv.state.toString(),
-            .detail = rv.body,
-            .context = null,
-            .item_type = item_type,
-        }) catch continue;
-
-        feedback_items.append(allocator, .{ .review_summary = rv }) catch {
-            // Roll back the items append to keep lists in sync
-            _ = items.pop();
-            continue;
-        };
-    }
-
-    // Add inline comments
-    // Store allocated secondary strings to free later
-    var secondary_strings = std.ArrayListUnmanaged([]const u8){};
-    defer {
-        for (secondary_strings.items) |s| allocator.free(s);
-        secondary_strings.deinit(allocator);
-    }
-
-    for (summary.comments) |comment| {
-        const secondary: ?[]const u8 = if (comment.path) |path| blk: {
-            if (comment.line) |line| {
-                const formatted = std.fmt.allocPrint(allocator, "{s}:{d}", .{ path, line }) catch break :blk path;
-                secondary_strings.append(allocator, formatted) catch {
-                    allocator.free(formatted);
-                    break :blk path;
-                };
-                break :blk formatted;
-            } else {
-                break :blk path;
-            }
-        } else null;
-
-        // Append both items atomically - if one fails, don't add either
-        items.append(allocator, .{
-            .primary = comment.author,
-            .secondary = secondary,
-            .detail = comment.body,
-            .context = null,
-            .item_type = .comment,
-        }) catch continue;
-
-        feedback_items.append(allocator, .{ .comment = comment }) catch {
-            // Roll back the items append to keep lists in sync
-            _ = items.pop();
-            continue;
-        };
-    }
-
-    if (items.items.len == 0) {
+    if (ReviewTUIState.tui_items.items.len == 0) {
         ui.print("\n  {s}No review feedback yet.{s}\n\n", .{ ui.Style.dim, ui.Style.reset });
         return;
     }
 
-    const result = tui.runInteractive(allocator, items.items) catch |err| {
+    // Create single PR info for header display
+    var single_pr_info = [_]tui.PRInfo{.{
+        .number = summary.pr_number,
+        .title = summary.pr_title,
+    }};
+
+    var current_index: usize = 0;
+
+    tui.runInteractive(
+        allocator,
+        ReviewTUIState.tui_items.items,
+        ReviewTUIState.copyCallback,
+        &single_pr_info,
+        &current_index,
+        null, // No PR change callback for single PR mode
+    ) catch |err| {
         ui.printError("TUI error: {any}\n", .{err});
-        return;
     };
-
-    switch (result.action) {
-        .quit => {},
-        .copy_raw => {
-            if (result.selected < feedback_items.items.len) {
-                const item = feedback_items.items[result.selected];
-                const text = switch (item) {
-                    .comment => |c| c.body,
-                    .review_summary => |rv| rv.body orelse "",
-                };
-                clipboard.copyWithFeedback(allocator, text);
-            }
-        },
-        .copy_llm => {
-            if (result.selected < feedback_items.items.len) {
-                const item = feedback_items.items[result.selected];
-                const context = prompt.PromptContext{
-                    .pr_title = summary.pr_title,
-                    .pr_number = summary.pr_number,
-                    .branch = summary.branch,
-                };
-
-                const formatted = switch (item) {
-                    .comment => |c| prompt.formatCommentFull(allocator, c, context) catch {
-                        ui.printError("Failed to format prompt\n", .{});
-                        return;
-                    },
-                    .review_summary => |rv| prompt.formatReview(allocator, rv, context) catch {
-                        ui.printError("Failed to format prompt\n", .{});
-                        return;
-                    },
-                };
-                defer allocator.free(formatted);
-                clipboard.copyWithFeedback(allocator, formatted);
-            }
-        },
-    }
 }
 
 fn cmdOpen(allocator: std.mem.Allocator) void {
@@ -2017,45 +2113,60 @@ fn cmdOpen(allocator: std.mem.Allocator) void {
     }
 
     // Multiple PRs - show selector
+    ui.print("\n  Select a PR to open:\n\n", .{});
+
+    for (prs.items, 0..) |pr, idx| {
+        const num = idx + 1;
+        ui.print("    {s}[{d}]{s} {s}#{d}{s} {s}\n", .{
+            ui.Style.dim,
+            num,
+            ui.Style.reset,
+            ui.Style.blue,
+            pr.number,
+            ui.Style.reset,
+            pr.title,
+        });
+    }
+
     ui.print("\n", .{});
+    ui.print("  PR to open (1-{d}): ", .{prs.items.len});
 
-    // Build list of PR descriptions
-    var pr_items = std.ArrayListUnmanaged([]const u8){};
-    defer {
-        for (pr_items.items) |item| {
-            allocator.free(item);
-        }
-        pr_items.deinit(allocator);
+    var input_buf: [32]u8 = undefined;
+    var input_len: usize = 0;
+    const stdin_fd = std.posix.STDIN_FILENO;
+    while (input_len < input_buf.len) {
+        const bytes_read = std.posix.read(stdin_fd, input_buf[input_len..]) catch {
+            ui.printError("Failed to read input\n", .{});
+            return;
+        };
+        if (bytes_read == 0) break;
+        input_len += bytes_read;
+        if (std.mem.indexOfScalar(u8, input_buf[0..input_len], '\n')) |_| break;
     }
+    const input: ?[]const u8 = if (input_len > 0) input_buf[0..input_len] else null;
 
-    for (prs.items) |pr| {
-        var desc_buf: [256]u8 = undefined;
-        const desc = std.fmt.bufPrint(&desc_buf, "#{d} {s}", .{ pr.number, pr.title }) catch {
-            ui.printError("Failed to format PR description\n", .{});
-            return;
-        };
-        const desc_copy = allocator.dupe(u8, desc) catch {
-            ui.printError("Failed to allocate memory\n", .{});
-            return;
-        };
-        pr_items.append(allocator, desc_copy) catch {
-            allocator.free(desc_copy);
-            ui.printError("Failed to allocate memory\n", .{});
-            return;
-        };
-    }
-
-    const selected = tui.selectFromList("Select a PR to open:", pr_items.items) catch {
-        ui.printError("Failed to display selection\n", .{});
+    if (input == null) {
+        ui.print("\n  Cancelled.\n\n", .{});
         return;
-    };
+    }
 
-    if (selected == null) {
+    const trimmed = std.mem.trim(u8, input.?, " \r\t\n");
+    if (trimmed.len == 0) {
         ui.print("  Cancelled.\n\n", .{});
         return;
     }
 
-    const selected_pr = prs.items[selected.?];
+    const pr_num = std.fmt.parseInt(usize, trimmed, 10) catch {
+        ui.printError("Invalid input. Enter a number.\n", .{});
+        return;
+    };
+
+    if (pr_num < 1 or pr_num > prs.items.len) {
+        ui.printError("Invalid PR number: {d}. Must be between 1 and {d}.\n", .{ pr_num, prs.items.len });
+        return;
+    }
+
+    const selected_pr = prs.items[pr_num - 1];
     ui.print("\n  Opening PR #{d}: {s}\n\n", .{ selected_pr.number, selected_pr.title });
     openUrl(allocator, selected_pr.url);
 }
@@ -2112,7 +2223,7 @@ fn printUsage() void {
         \\    -f, --force       Force merge (only blocked by merge conflicts)
         \\
         \\REVIEW OPTIONS:
-        \\    -i, --interactive Interactively select a PR to view reviews
+        \\    --stack, -s       Show feedback for all PRs in stack (navigate with h/l)
         \\    --pr, -p <NUM>    Show feedback for specific PR number
         \\    --list, -l        Print feedback as a list (non-interactive)
         \\
@@ -2129,7 +2240,7 @@ fn printUsage() void {
         \\    ztk merge -i      # Interactively select which PRs to merge
         \\    ztk merge -r      # Merge and rebase local branch
         \\    ztk review        # Interactive review feedback TUI (current PR)
-        \\    ztk review -i     # Select a PR to view reviews
+        \\    ztk review -s     # Review feedback for all PRs in stack
         \\    ztk review --list # Print feedback as list
         \\    ztk open          # Open a PR in the browser
         \\

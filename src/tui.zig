@@ -373,51 +373,118 @@ pub const ListView = struct {
     }
 };
 
-/// Run an interactive TUI loop with the given list items
-/// Returns the action taken and the selected item index
-pub const Action = enum {
-    quit,
-    copy_raw,
-    copy_llm,
+/// Callback function type for copy operations
+pub const CopyCallback = *const fn (selected: usize, copy_llm: bool) void;
+
+/// PR info for multi-PR navigation
+pub const PRInfo = struct {
+    number: u32,
+    title: []const u8,
 };
 
-pub fn runInteractive(allocator: std.mem.Allocator, items: []const ListItem) !struct { action: Action, selected: usize } {
-    _ = allocator;
-
+/// Run an interactive TUI loop with the given list items
+/// The copy_callback is called when user presses c/y/C, allowing copy without exiting
+/// If prs is provided with multiple PRs, left/right navigation switches between them
+/// and pr_change_callback is called when the user navigates to a different PR
+pub fn runInteractive(
+    allocator: std.mem.Allocator,
+    items: []const ListItem,
+    copy_callback: ?CopyCallback,
+    prs: ?[]const PRInfo,
+    current_pr_index: *usize,
+    pr_change_callback: ?*const fn (allocator: std.mem.Allocator, pr_index: usize) ?[]const ListItem,
+) !void {
     var term = try Terminal.init();
     defer term.deinit();
 
     // Calculate visible height (leave room for header and footer)
     const size = try term.getSize();
-    const visible_height = if (size.height > 8) size.height - 8 else 10;
+    const visible_height = if (size.height > 10) size.height - 10 else 8;
 
-    var list = ListView.init(items, visible_height);
+    var current_items = items;
+    var list = ListView.init(current_items, visible_height);
+
+    // Status message for feedback
+    var status_msg: ?[]const u8 = null;
+    var status_is_error = false;
 
     try term.enterRawMode();
     defer term.exitRawMode();
 
     while (true) {
-        list.render(&term);
+        renderWithPRNav(&list, &term, prs, current_pr_index.*, status_msg, status_is_error);
+
+        // Clear status after showing it
+        status_msg = null;
+        status_is_error = false;
 
         const key = try term.readKey();
         switch (key) {
             .up => list.moveUp(),
             .down => list.moveDown(),
+            .left => {
+                // Navigate to previous PR
+                if (prs != null and current_pr_index.* > 0 and pr_change_callback != null) {
+                    current_pr_index.* -= 1;
+                    if (pr_change_callback.?(allocator, current_pr_index.*)) |new_items| {
+                        current_items = new_items;
+                        list = ListView.init(current_items, visible_height);
+                    }
+                }
+            },
+            .right => {
+                // Navigate to next PR
+                if (prs) |pr_list| {
+                    if (current_pr_index.* + 1 < pr_list.len and pr_change_callback != null) {
+                        current_pr_index.* += 1;
+                        if (pr_change_callback.?(allocator, current_pr_index.*)) |new_items| {
+                            current_items = new_items;
+                            list = ListView.init(current_items, visible_height);
+                        }
+                    }
+                }
+            },
             .enter => list.toggleExpanded(),
             .escape, .ctrl_c, .ctrl_d => {
-                return .{ .action = .quit, .selected = list.selected };
+                return;
             },
             .char => |c| {
                 if (c == 'k') {
                     list.moveUp();
                 } else if (c == 'j') {
                     list.moveDown();
+                } else if (c == 'h') {
+                    // Navigate to previous PR (vim-style)
+                    if (prs != null and current_pr_index.* > 0 and pr_change_callback != null) {
+                        current_pr_index.* -= 1;
+                        if (pr_change_callback.?(allocator, current_pr_index.*)) |new_items| {
+                            current_items = new_items;
+                            list = ListView.init(current_items, visible_height);
+                        }
+                    }
+                } else if (c == 'l') {
+                    // Navigate to next PR (vim-style)
+                    if (prs) |pr_list| {
+                        if (current_pr_index.* + 1 < pr_list.len and pr_change_callback != null) {
+                            current_pr_index.* += 1;
+                            if (pr_change_callback.?(allocator, current_pr_index.*)) |new_items| {
+                                current_items = new_items;
+                                list = ListView.init(current_items, visible_height);
+                            }
+                        }
+                    }
                 } else if (c == 'c' or c == 'y') {
-                    return .{ .action = .copy_llm, .selected = list.selected };
+                    if (copy_callback) |cb| {
+                        cb(list.selected, true);
+                        status_msg = "Copied to clipboard (LLM format)";
+                    }
                 } else if (c == 'C') {
-                    return .{ .action = .copy_raw, .selected = list.selected };
+                    if (copy_callback) |cb| {
+                        cb(list.selected, false);
+                        status_msg = "Copied to clipboard (raw)";
+                    }
                 } else if (c == 'q') {
-                    return .{ .action = .quit, .selected = list.selected };
+                    return;
                 }
             },
             else => {},
@@ -554,12 +621,12 @@ fn renderSelectList(title: []const u8, items: []const []const u8, selected: usiz
 
 /// Confirm with a yes/no prompt (inline, single keypress)
 /// Returns true for yes, false for no/cancel
-pub fn confirm(prompt: []const u8) !bool {
+pub fn confirm(prompt_text: []const u8) !bool {
     var term = try Terminal.init();
     defer term.deinit();
 
     // Print prompt
-    ui.print("{s} {s}[y/N]{s} ", .{ prompt, ui.Style.dim, ui.Style.reset });
+    ui.print("{s} {s}[y/N]{s} ", .{ prompt_text, ui.Style.dim, ui.Style.reset });
 
     // Enter raw mode for single keypress
     try term.enterRawModeInline();
@@ -574,4 +641,110 @@ pub fn confirm(prompt: []const u8) !bool {
         .char => |c| c == 'y' or c == 'Y',
         else => false,
     };
+}
+
+fn renderWithPRNav(list: *ListView, term: *Terminal, prs: ?[]const PRInfo, current_pr_index: usize, status_msg: ?[]const u8, status_is_error: bool) void {
+    term.clear();
+    term.moveTo(0, 0);
+
+    // Header with PR navigation if multiple PRs
+    if (prs) |pr_list| {
+        if (pr_list.len > 1) {
+            const current_pr = pr_list[current_pr_index];
+            ui.print("{s}PR #{d}: {s}{s}\n", .{
+                ui.Style.bold,
+                current_pr.number,
+                current_pr.title,
+                ui.Style.reset,
+            });
+            ui.print("{s}← h/l →: switch PR ({d}/{d})  ", .{
+                ui.Style.dim,
+                current_pr_index + 1,
+                pr_list.len,
+            });
+            ui.print("j/k: navigate  Enter: expand  c/y: copy+LLM  C: copy raw  q: quit{s}\n\n", .{ui.Style.reset});
+        } else if (pr_list.len == 1) {
+            const current_pr = pr_list[0];
+            ui.print("{s}PR #{d}: {s}{s}\n", .{
+                ui.Style.bold,
+                current_pr.number,
+                current_pr.title,
+                ui.Style.reset,
+            });
+            ui.print("{s}j/k: navigate  Enter: expand  c/y: copy+LLM  C: copy raw  q: quit{s}\n\n", .{ ui.Style.dim, ui.Style.reset });
+        }
+    } else {
+        ui.print("{s}PR Review Feedback{s}\n", .{ ui.Style.bold, ui.Style.reset });
+        ui.print("{s}j/k: navigate  Enter: expand  c/y: copy+LLM  C: copy raw  q: quit{s}\n\n", .{ ui.Style.dim, ui.Style.reset });
+    }
+
+    if (list.items.len == 0) {
+        ui.print("{s}No feedback items.{s}\n", .{ ui.Style.dim, ui.Style.reset });
+        return;
+    }
+
+    const start = list.scroll_offset;
+    const end = @min(start + list.visible_height, list.items.len);
+
+    for (list.items[start..end], start..) |item, i| {
+        const is_selected = i == list.selected;
+        const icon = ListView.getTypeIcon(item.item_type);
+        const selector = if (is_selected) ui.Style.blue ++ ui.Style.arrow ++ ui.Style.reset else "  ";
+
+        if (is_selected) {
+            ui.print(" {s} {s} {s}{s}{s}\n", .{
+                selector,
+                icon,
+                ui.Style.bold,
+                item.primary,
+                ui.Style.reset,
+            });
+        } else {
+            ui.print(" {s} {s} {s}\n", .{
+                selector,
+                icon,
+                item.primary,
+            });
+        }
+
+        if (item.secondary) |sec| {
+            ui.print("        {s}{s}{s}\n", .{ ui.Style.dim, sec, ui.Style.reset });
+        }
+
+        // Show expanded detail for selected item
+        if (is_selected and list.expanded) {
+            if (item.detail) |detail| {
+                ui.print("\n", .{});
+                ui.print("        {s}───────────────────────────────────────{s}\n", .{ ui.Style.dim, ui.Style.reset });
+                // Print detail with some indentation
+                var lines = std.mem.splitScalar(u8, detail, '\n');
+                while (lines.next()) |line| {
+                    ui.print("        {s}\n", .{line});
+                }
+                ui.print("        {s}───────────────────────────────────────{s}\n", .{ ui.Style.dim, ui.Style.reset });
+                ui.print("\n", .{});
+            }
+        }
+    }
+
+    // Footer with scroll indicator and status
+    ui.print("\n", .{});
+    if (list.items.len > list.visible_height) {
+        ui.print("{s}[{d}/{d}]{s}", .{
+            ui.Style.dim,
+            list.selected + 1,
+            list.items.len,
+            ui.Style.reset,
+        });
+    }
+
+    // Show status message if present
+    if (status_msg) |msg| {
+        if (status_is_error) {
+            ui.print("  {s}{s}{s}", .{ ui.Style.red, msg, ui.Style.reset });
+        } else {
+            ui.print("  {s}{s}{s}", .{ ui.Style.green, msg, ui.Style.reset });
+        }
+    }
+    ui.print("\n", .{});
 }
