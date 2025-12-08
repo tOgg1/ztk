@@ -376,20 +376,26 @@ pub const ListView = struct {
 /// Callback function type for copy operations
 pub const CopyCallback = *const fn (selected: usize, copy_llm: bool) void;
 
+/// Callback function type for opening URLs
+pub const OpenCallback = *const fn (url: []const u8) void;
+
 /// PR info for multi-PR navigation
 pub const PRInfo = struct {
     number: u32,
     title: []const u8,
+    url: []const u8,
 };
 
 /// Run an interactive TUI loop with the given list items
 /// The copy_callback is called when user presses c/y/C, allowing copy without exiting
+/// The open_callback is called when user presses o to open the current PR in browser
 /// If prs is provided with multiple PRs, left/right navigation switches between them
 /// and pr_change_callback is called when the user navigates to a different PR
 pub fn runInteractive(
     allocator: std.mem.Allocator,
     items: []const ListItem,
     copy_callback: ?CopyCallback,
+    open_callback: ?OpenCallback,
     prs: ?[]const PRInfo,
     current_pr_index: *usize,
     pr_change_callback: ?*const fn (allocator: std.mem.Allocator, pr_index: usize) ?[]const ListItem,
@@ -482,6 +488,16 @@ pub fn runInteractive(
                     if (copy_callback) |cb| {
                         cb(list.selected, false);
                         status_msg = "Copied to clipboard (raw)";
+                    }
+                } else if (c == 'o') {
+                    // Open current PR in browser
+                    if (prs) |pr_list| {
+                        if (current_pr_index.* < pr_list.len) {
+                            if (open_callback) |cb| {
+                                cb(pr_list[current_pr_index.*].url);
+                                status_msg = "Opening PR in browser...";
+                            }
+                        }
                     }
                 } else if (c == 'q') {
                     return;

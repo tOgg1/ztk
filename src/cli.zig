@@ -1633,6 +1633,10 @@ const ReviewTUIState = struct {
         }
     }
 
+    fn openCallback(url: []const u8) void {
+        openUrl(allocator, url);
+    }
+
     fn prChangeCallback(alloc: std.mem.Allocator, pr_index: usize) ?[]const tui.ListItem {
         _ = alloc;
         if (pr_index >= pr_summaries.items.len) return null;
@@ -1828,6 +1832,7 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
                 ReviewTUIState.pr_infos.append(allocator, .{
                     .number = pr.number,
                     .title = commit.title,
+                    .url = summary.pr_url,
                 }) catch {
                     // Roll back pr_summaries append to keep lists in sync
                     // We just appended so the list is guaranteed non-empty
@@ -1872,6 +1877,7 @@ fn cmdReview(allocator: std.mem.Allocator, args: []const [:0]const u8) void {
                 allocator,
                 ReviewTUIState.tui_items.items,
                 ReviewTUIState.copyCallback,
+                ReviewTUIState.openCallback,
                 ReviewTUIState.pr_infos.items,
                 &current_pr_index,
                 ReviewTUIState.prChangeCallback,
@@ -2024,6 +2030,7 @@ fn runReviewTUISingle(allocator: std.mem.Allocator, summary: *review.PRReviewSum
     var single_pr_info = [_]tui.PRInfo{.{
         .number = summary.pr_number,
         .title = summary.pr_title,
+        .url = summary.pr_url,
     }};
 
     var current_index: usize = 0;
@@ -2032,6 +2039,7 @@ fn runReviewTUISingle(allocator: std.mem.Allocator, summary: *review.PRReviewSum
         allocator,
         ReviewTUIState.tui_items.items,
         ReviewTUIState.copyCallback,
+        ReviewTUIState.openCallback,
         &single_pr_info,
         &current_index,
         null, // No PR change callback for single PR mode
