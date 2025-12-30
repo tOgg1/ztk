@@ -7,6 +7,7 @@ zig-out/
 *.obj
 *.exe
 *.bin
+.DS_Store
 
 
 START.md
